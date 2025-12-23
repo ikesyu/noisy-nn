@@ -16,7 +16,7 @@ def sampleNet(x):
     for i, fc in enumerate(fcs):
         x = fc.dot(x)
         if i < len(fcs)-1:
-            x = th(x+np.random.uniform())
+            x = th(x+np.random.uniform(size=x.shape))
     return x
 
 
