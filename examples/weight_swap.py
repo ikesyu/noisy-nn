@@ -111,12 +111,17 @@ def switch_learn(seed=0, switch_loc=15000, epochs=30000):
     losses = {}
     for dst_name, m in models.items():
         # plt.figure()
+        loss, stages = train_model(
+            m, epochs=epochs-switch_loc, seed=seed,
+            layers=None)
+        losses[("untrained", dst_name)] = loss
         for src_name, w in weights.items():
             print(f"src={src_name} dst={dst_name}")
             loss, stages = train_model(
                 m, epochs=epochs-switch_loc, seed=seed,
                 layers=w[f"epoch_{switch_loc}"])
             losses[(src_name, dst_name)] = loss
+
             # plt.plot(loss, label=f"{src_name} {dst_name}")
         # plt.legend()
     torch.save(losses, f"switch_learn_{seed}_{switch_loc}.pt")
@@ -164,7 +169,7 @@ def plot_results(seed=0, switch_loc=15000):
     plt.show()
 
 
-# full_learn(0)
-for switch_loc in [25000]:  # 1000, 10000,
+full_learn(0)
+for switch_loc in [1000, 10000, 25000]:
     switch_learn(0, switch_loc)
     plot_results(0, switch_loc)
