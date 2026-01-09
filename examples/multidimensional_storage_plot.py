@@ -120,4 +120,24 @@ def unidim_comparison():
     plt.show()
 
 
-unidim_comparison()
+def bidim_comparison():
+    structure = Structure([100, 100])
+    losses = {True: [], False: []}
+    nfuncs = range(1, 11)
+    for shuffle in [True, False]:
+        for i in nfuncs:
+            function = SineFunctions([i, i], epochs=50000//i, shuffle=shuffle)
+            loss = retrieve(structure, function)["losses"]
+            losses[shuffle].append(np.max(loss))
+    plt.plot(nfuncs, losses[False], label="odered")
+    plt.plot(nfuncs, losses[True], label="shuffled")
+    plt.xlabel("Number of functions")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+
+# unidim_comparison()
+bidim_comparison()

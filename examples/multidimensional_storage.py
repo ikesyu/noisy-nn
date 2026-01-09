@@ -233,7 +233,15 @@ def train_net(structure, functions):
     return model_analytic, losses
 
 
-def sine_pfa(x, n_phase=1, n_freq=1, n_amp=1, shuffle=False):
+def sine_pfa(x, n_phase=1, n_freq=None, n_amp=None, shuffle=False):
+    tosqueeze = []
+    if n_freq is None:
+        tosqueeze.append(1)
+        n_freq = 1
+    if n_amp is None:
+        tosqueeze.append(2)
+        n_amp = 1
+
     phase = np.linspace(0, 2*np.pi, n_phase, endpoint=False)
     freq = np.linspace(1, 2, n_freq)
     amp = np.linspace(1, 2, n_amp)
@@ -244,11 +252,10 @@ def sine_pfa(x, n_phase=1, n_freq=1, n_amp=1, shuffle=False):
 
     assert np.min(vals.shape) > 0, "did you pass shuffle by value?"
 
-    tosqueeze = [dim for dim in range(1, 3) if vals.shape[dim] == 1]
     # print(f"before squeeze {vals.shape}")
     if len(tosqueeze) > 0:
         vals = np.squeeze(vals, axis=tuple(tosqueeze))
-        # print(f"after squeeze {vals.shape}")
+        print(f"after squeeze {vals.shape}")
     if shuffle:
         shape = tuple(vals.shape)
         vals = vals.reshape(-1, shape[-2], shape[-1])
