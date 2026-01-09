@@ -2,12 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import hsv_to_rgb
+import math
+import gc
 
-from concurrent.futures import ProcessPoolExecutor
-from itertools import repeat
-import os
 
 import sys  # noqa
 sys.path.append("../")  # noqa
@@ -17,18 +14,84 @@ from nnn import model  # noqa
 from nnn import layer  # noqa
 from nnn import activation  # noqa
 
-# device = torch.device("cuda")
-# torch.set_default_device(device)
 
+def set_cuda(active):
+    if active:
+        device = torch.device("cuda")
+
+    else:
+        device = torch.device("cpu")
+    torch.set_default_device(device)
 
 # データセットの作成
-x = np.linspace(-2 * np.pi, 2 * np.pi, 200).reshape(-1, 1)
-x_tensor = torch.tensor(x, dtype=torch.float32)
 
-noise_structure = [100]
 
-# [8*8*8]  # [8, 8, 8]
-structure = [1] + [np.prod(noise_structure)]*2+[1]
+def all_live_tensors():
+    tensors = []
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, torch.Tensor):
+                tensors.append(obj)
+        except Exception:
+            pass  # Some proxies can raise on isinstance
+    return tensors
+
+
+def list_tensors():
+    tensors = all_live_tensors()
+    print(f"Found {len(tensors)} tensors")
+    for t in tensors[:50]:  # limit output
+        try:
+            size_bytes = t.numel() * t.element_size()
+            print(f"device={t.device}, shape={tuple(t.shape)}, dtype={t.dtype}, "
+                  f"requires_grad={t.requires_grad}, size={size_bytes/1e6:.3f} MB")
+        except Exception as e:
+            print(f"tensor print error: {e}")
+
+    # Aggregate by device
+    from collections import Counter
+    counts = Counter(t.device for t in tensors)
+    print("Counts by device:", counts)
+    bytes_by_device = {}
+    for t in tensors:
+        try:
+            bytes_by_device[t.device] = bytes_by_device.get(
+                t.device, 0) + t.numel() * t.element_size()
+        except Exception:
+            pass
+    print("Approx memory by device (tensors only):",
+          {d: f"{b/1e6:.2f} MB" for d, b in bytes_by_device.items()})
+
+
+def all_live_modules():
+    mods = []
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, nn.Module):
+                mods.append(obj)
+        except Exception:
+            pass
+    return mods
+
+
+def list_modules():
+    for m in all_live_modules():
+        print(f"Module: {type(m).__name__}")
+        for name, p in m.named_parameters(recurse=False):
+            print(f"  param {name}: device={p.device}, shape={tuple(p.shape)}")
+        for name, b in m.named_buffers(recurse=False):
+            print(f"  buffer {name}: device={
+                  b.device}, shape={tuple(b.shape)}")
+
+
+class Structure:
+
+    def __init__(self, noise_structure, activation_ratio=0.5):
+        self.noise_structure = noise_structure
+        self.activation_ratio = activation_ratio
+        self.real_structure = [1] + [np.prod(noise_structure)]*2+[1]
+
+        # [8*8*8]  # [8, 8, 8]
 
 
 def gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False):
@@ -58,7 +121,6 @@ def gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False):
         coords = torch.linspace(0, 1, n, device=device, dtype=dtype)
         g1 = torch.exp(-0.5 *
                        ((coords - center[d]) / sigma[d]) ** 2)
-        # g1 = torch.where(g1 >= 0.1, g1, 0)
         shape = [1] * D
         shape[d] = n
         out.mul_(g1.view(shape))
@@ -69,30 +131,62 @@ def gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False):
     return out
 
 
-def noise_pattern(center):
-    stdvecs = gaussian_fill(shape=noise_structure,
-                            center=center,
-                            sigma=[0.1 for n in noise_structure],
+def compute_sigma(a, p, d):
+    """
+    Compute sigma for a d-dimensional Gaussian with peak=1,
+    such that the volume of the ball where amplitude > a is p.
+
+    Parameters:
+    d (int): Number of dimensions
+    a (float): Amplitude threshold (0 < a < 1)
+    p (float): Desired volume
+
+    Returns:
+    float: The value of sigma
+    """
+    if not (0 < a < 1):
+        raise ValueError("a must be between 0 and 1")
+    if p <= 0:
+        raise ValueError("p must be positive")
+    if d <= 0:
+        raise ValueError("d must be positive")
+
+    # Volume of unit ball in d dimensions
+    C_d = math.pi**(d/2) / math.gamma(d/2 + 1)
+
+    # Radius r such that volume of ball is p
+    r = (p / C_d)**(1/d)
+
+    # From r^2 = -2 * sigma^2 * ln(a)
+    sigma_squared = - (r**2) / (2 * math.log(a))
+
+    return math.sqrt(sigma_squared)
+
+
+def noise_pattern(structure, center):
+    cut_at = 0.1
+    sigma = compute_sigma(
+        cut_at, structure.activation_ratio, len(structure.noise_structure))
+    # print(f"d={len(noise_structure)} sigma={sigma}")
+    scaled_center = structure.activation_ratio / \
+        2+(1-structure.activation_ratio)*np.array(center)
+    stdvecs = gaussian_fill(shape=structure.noise_structure,
+                            center=scaled_center,
+                            sigma=[sigma for n in structure.noise_structure],
                             amplitude=1,
                             normalize=False
                             ).reshape(-1)
-    stdvecs = torch.where(stdvecs >= 0.1, stdvecs, 0)
+    stdvecs = torch.where(stdvecs >= cut_at, stdvecs, 0)
     return [stdvecs]*2
 
 
-def noise_pattern_table(shape):
+def noise_pattern_table(structure, shape):
     noise_patterns = np.empty(shape, dtype=object)
     # print(f"noise pattern_table {shape=}")
     for idx in np.ndindex(shape):
-        noise_patterns[idx] = noise_pattern(fractional_index(idx, shape))
+        noise_patterns[idx] = noise_pattern(
+            structure, fractional_index(idx, shape))
     return noise_patterns
-
-
-def set_colors(N):
-    # hue: blue (2/3) -> red (0)
-    h = np.linspace(2/3, 0, N)
-    colors = hsv_to_rgb(np.column_stack([h, np.ones(N), np.ones(N)]))
-    plt.gca().set_prop_cycle(color=colors)
 
 
 def fractional_index(idx, shape):
@@ -100,43 +194,46 @@ def fractional_index(idx, shape):
     return fidx
 
 
-def train_net(ys):
+def train_net(structure, functions):
     # print(f"Net stucture {structure}")
-    model_analytic = model.SimpleNNNAnalytic(structure)
+    model_analytic = model.SimpleNNNAnalytic(structure.real_structure)
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model_analytic.parameters(),
                            lr=1E-4, weight_decay=0.0)
 
-    yshape = ys.shape[:-2]
-    noise_patterns = noise_pattern_table(yshape)
+    yshape = functions.ys.shape[:-2]
+    noise_patterns = noise_pattern_table(structure, yshape)
+    epochs = functions.epochs
     # print(f"{yshape=}")
-    epochs = int(np.ceil(20000/np.prod(yshape)))
+    # epochs = int(np.ceil(20000/np.prod(yshape)))
     # epochs = 10000
     # epochs = 2
-    print(f"using {epochs=}")
+    print(f"using {epochs=} device={noise_patterns.reshape(-1)[0][0].device}")
+    print("intra-op threads:", torch.get_num_threads())
+    print("inter-op threads:", torch.get_num_interop_threads())
     indices = list(np.ndindex(yshape))
+    # list_tensors()
+    # list_modules()
     for epoch in range(epochs):
-        optimizer.zero_grad()
         for idx in indices:
-            output = model_analytic(x_tensor, noise_patterns[idx])
-            loss = criterion(output, ys[idx])
+            optimizer.zero_grad()
+            output = model_analytic(functions.x_tensor, noise_patterns[idx])
+            loss = criterion(output, functions.ys[idx])
             loss.backward()
-        optimizer.step()
-        # if epoch == 0:
-        #    plt.show()
+            optimizer.step()
 
     losses = []
     with torch.no_grad():
         for idx in indices:
-            output = model_analytic(x_tensor, noise_patterns[idx])
-            loss = criterion(output, ys[idx])
+            output = model_analytic(functions.x_tensor, noise_patterns[idx])
+            loss = criterion(output, functions.ys[idx])
             losses.append(float(loss.item()))
 
     return model_analytic, losses
 
 
-def sine_pfa(n_phase=1, n_freq=1, n_amp=1, shuffle=False):
+def sine_pfa(x, n_phase=1, n_freq=1, n_amp=1, shuffle=False):
     phase = np.linspace(0, 2*np.pi, n_phase, endpoint=False)
     freq = np.linspace(1, 2, n_freq)
     amp = np.linspace(1, 2, n_amp)
@@ -162,168 +259,29 @@ def sine_pfa(n_phase=1, n_freq=1, n_amp=1, shuffle=False):
     return torch.tensor(vals, dtype=torch.float32)
 
 
-def plot_noise(shape):
-    #
-    noise_patterns = noise_pattern_table(shape)
-
-    dims = np.sum([1 if n > 1 else 0 for n in shape])
-    if dims == 1:
-        set_colors(np.prod(shape))
-        for idx in np.ndindex(shape):
-            plt.plot(noise_patterns[idx][0].detach().cpu(), label=f"{idx=}")
-    if dims == 2:
-        R, C = [d for d in shape if d > 1]
-        fig, axes = plt.subplots(R, C, figsize=(3*C, 3*R))
-        for idx in np.ndindex(shape):
-            ax = axes[idx[-2:]]
-            ax.imshow(noise_patterns[idx]
-                      [0].detach().cpu().reshape(noise_structure[-2:]))
-            ax.set_title(f"idx={idx}")
-            ax.axis("off")
-
-        plt.tight_layout()
-
-
-def select_indices(shape):
-    indices = list(np.ndindex(shape))
-    n = len(indices)
-    if n > 27:
-        step = int(np.ceil(n/27))
-        indices = indices[::step]
-    return indices
-
-
-def plot_ys(ys):
-    shape = ys.shape[:-2]
-    # print(f"{ys.shape=}{shape=}")
-    indices = select_indices(shape)
-    set_colors(len(indices))
-    for idx in indices:
-        plt.plot(x, ys[idx].detach().cpu().numpy(), label=f"{idx=}")
-    plt.legend()
-
-
-def plot_inference(shape, m):
-    indices = select_indices(shape)
-    set_colors(len(indices))
-    for idx in indices:
-        stdvecs = noise_pattern(fractional_index(idx, shape))
-        output = m(x_tensor, stdvecs).detach().cpu().numpy()
-        plt.plot(x, output, ".--", label=f"{idx=}")
-    plt.legend()
-
-
-def test_shape(shape, shuffle=False):
-    shape = tuple(shape)
-    plot_noise(shape)
-
-    # plt.legend()
-    ys = sine_pfa(*shape, shuffle=shuffle)
-    # print(f"testing {shape=} {ys.shape=}")
-    plt.figure()
-    plot_ys(ys)
-
-    print("training begin")
-    m, l = train_net(ys)
-    print("training end")
-    plt.figure()
-    plot_inference(shape, m)
-    plt.show()
-
-
-def worker(shape, shuffle, threads_per_run):
-    # Force CPU-only and cap per-process threads to avoid oversubscription
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-    os.environ.setdefault("OMP_NUM_THREADS", str(threads_per_run))
-    os.environ.setdefault("MKL_NUM_THREADS", str(threads_per_run))
-    torch.set_num_threads(threads_per_run)
-    ys = sine_pfa(*shape, shuffle=shuffle)
-    model, losses = train_net(ys)
-    return losses
-
-
-def run_batch(shapes, shuffle):
-    cpus = os.cpu_count()-1
-    n_jobs = min(cpus, len(shapes))
-    threads_per_run = cpus//n_jobs
-
-    print(f"{os.cpu_count()=} {n_jobs=} {threads_per_run=}")
-    with ProcessPoolExecutor(max_workers=n_jobs) as ex:
-        # ex.map preserves order; repeat() passes constants to all calls
-        results = list(
-            ex.map(worker, shapes, repeat(shuffle), repeat(threads_per_run)))
-    res = {tuple(s): r for s, r in zip(shapes, results)}
-    return res
-
+class SineFunctions:
+    def __init__(self, shape, shuffle=False, epochs=1000):
+        self.shuffle = shuffle
+        self.shape = tuple(shape)
+        self.x = np.linspace(-2 * np.pi, 2 * np.pi, 200).reshape(-1, 1)
+        self.x_tensor = torch.tensor(self.x, dtype=torch.float32)
+        self.ys = sine_pfa(self.x, *shape, shuffle=shuffle)
+        self.epochs = epochs
     # threads_per_run = max(1, os.cpu_count()-2)
 
 
-def compute_storage_comparison(shapes, label=""):
-    results = {"ordered": run_batch(shapes, shuffle=False),
-               "shuffled": run_batch(shapes, shuffle=True)
-               }
-    torch.save(results, f"multidimensional_storage_{label}.pt")
-
-
-def plot_storage_comparisons(label=""):
-    results = torch.load(f"multidimensional_storage_{label}.pt",
-                         map_location="cpu", weights_only=False)
-
-    def get_props(res):
-        x = []
-        y = []
-        for shape, losses in res.items():
-            x.append(shape[0])
-            y.append(np.max(losses))
-        return x, y
-
-    for name, res in results.items():
-        x, y = get_props(res)
-        plt.plot(x, y, ".-", label=name)
-
-    plt.xlabel("Functions per dimension")
-    plt.ylabel("Loss")
-    plt.grid(True)
-
-    plt.legend()
-    plt.show()
-
-
-def active_count(dims, sigma):
-    size = int(np.ceil(np.pow(256, 1.0/dims)))
-    # size = 256
-    shape = [size]*dims
-    # print(f"{shape=}")
-    center = [0.5]*dims
-    g = gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False)
-    count = torch.count_nonzero(g > 1E-3).item()
-    return count/np.prod(shape)
-
-
-def compare_active_count():
-    sigmas = np.linspace(0, 1, 100)
-    for d in range(1, 4):
-        a = [active_count(d, sigma) for sigma in sigmas]
-        plt.plot(sigmas, a, ".-", label=f"{d=}")
-    plt.legend()
-    plt.grid(True)
-
-    plt.figure()
-    ds = range(1, 3)
-    a = [active_count(d, np.sqrt(d)*0.1) for d in ds]
-    plt.plot(ds, a)
-    plt.show()
-
-
-compare_active_count()
+# compare_active_count()
 
 # plt.plot(noise_pattern([0, 0, 0])[0].detach().cpu().numpy())
 # plt.figure()
 # plt.show()
-# test_shape([2, 2, 3])
+# test_shape([10, 10])
 # test_shape([2, 2, 3], shuffle=True)
 
 # shapes = [[i, i, i] for i in range(1, 6, 1)]
+# compute_storage_comparison(shapes, "tridim")
+# plot_storage_comparisons("tridim")
+
 
 # shapes = [[i] for i in range(1, 101, 1)]
 # compute_storage_comparison(shapes, "unidim")
