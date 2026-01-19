@@ -81,7 +81,8 @@ def test_shape(structure, functions, shuffle=False):
     print("training end")
     plt.figure()
     plot_inference(structure, functions, m)
-    plt.show()
+    plt.savefig("../fig/test_shape.pdf")
+    # plt.show()
 
 
 def test():
@@ -89,7 +90,6 @@ def test():
     structure = Structure([100])
     functions = SineFunctions([10], epochs=10000)
     test_shape(structure, functions)
-    plt.show()
 
 
 def retrieve(structure, functions):
@@ -103,21 +103,29 @@ def retrieve(structure, functions):
 
 def unidim_comparison():
     structure = Structure([100])
-    losses = {True: [], False: []}
+    losses = {sl: {s: [] for s in [False, True]} for sl in [False, True]}
     nfuncs = range(1, 101)
-    for shuffle in [True, False]:
-        for i in nfuncs:
-            function = SineFunctions([i], epochs=20000//i, shuffle=shuffle)
-            loss = retrieve(structure, function)["losses"]
-            losses[shuffle].append(np.max(loss))
-    plt.plot(nfuncs, losses[False], label="odered")
-    plt.plot(nfuncs, losses[True], label="shuffled")
+    for shuffle_learning in [True, False]:
+        for shuffle in [True, False]:
+            for i in nfuncs:
+                function = SineFunctions(
+                    [i], epochs=20000//i, shuffle=shuffle, shuffle_learning=shuffle_learning)
+                loss = retrieve(structure, function)["losses"]
+                losses[shuffle_learning][shuffle].append(np.max(loss))
+
+    for shuffle_learning in [True, False]:
+        for shuffle in [True, False]:
+            place = "shuffled" if shuffle else "ordered"
+            learn = "random" if shuffle_learning else "ordered"
+            plt.plot(nfuncs, losses[shuffle_learning][shuffle], label=f"{
+                     place} location, {learn} learning")
     plt.xlabel("Number of functions")
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.show()
+    plt.savefig("../fig/unidim_comparison.pdf")
+    # plt.show()
 
 
 def bidim_comparison():
@@ -126,7 +134,7 @@ def bidim_comparison():
     nfuncs = range(1, 11)
     for shuffle in [True, False]:
         for i in nfuncs:
-            function = SineFunctions([i, i], epochs=50000//i, shuffle=shuffle)
+            function = SineFunctions([i, i], epochs=20000//i, shuffle=shuffle)
             loss = retrieve(structure, function)["losses"]
             losses[shuffle].append(np.max(loss))
     plt.plot(nfuncs, losses[False], label="odered")
@@ -136,8 +144,29 @@ def bidim_comparison():
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.show()
+    plt.savefig("../fig/bidim_comparison.pdf")
 
 
-# unidim_comparison()
+def tridim_comparison():
+    structure = Structure([20, 20, 20])
+    losses = {True: [], False: []}
+    nfuncs = range(1, 11)
+    for shuffle in [True, False]:
+        for i in nfuncs:
+            function = SineFunctions(
+                [i, i, i], epochs=20000//i, shuffle=shuffle)
+            loss = retrieve(structure, function)["losses"]
+            losses[shuffle].append(np.max(loss))
+    plt.plot(nfuncs, losses[False], label="odered")
+    plt.plot(nfuncs, losses[True], label="shuffled")
+    plt.xlabel("Number of functions")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig("../fig/tridim_comparison.pdf")
+
+
+unidim_comparison()
 bidim_comparison()
+tridim_comparison()

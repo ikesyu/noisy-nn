@@ -8,7 +8,10 @@ import time
 def get_filename(structure, functions):
     ns = '_'.join([f"{n}" for n in structure.noise_structure])
     fs = '_'.join([f"{n}" for n in functions.shape])
-    shuffle = "1" if functions.shuffle else "0"
+    if functions.shuffle_learning:
+        shuffle = "3" if functions.shuffle else "2"
+    else:
+        shuffle = "1" if functions.shuffle else "0"
     label = f"n{ns}_a{structure.activation_ratio}_f{
         fs}_s{shuffle}_e{functions.epochs}"
     fname = f"../data/multidim_{label}.pt"
@@ -36,6 +39,8 @@ if __name__ == "__main__":
 
     parser.add_argument(
         '--shuffle', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        '--shuffle_learning', action=argparse.BooleanOptionalAction, default=False)
 
     parser.add_argument('--activation_ratio', type=float,
                         default=0.5, help='Percentange of neurons active')
@@ -53,7 +58,9 @@ if __name__ == "__main__":
     structure = Structure(args.noise_structure,
                           args.activation_ratio)
     functions = SineFunctions(args.function_structure,
-                              shuffle=args.shuffle, epochs=args.epochs)
+                              shuffle=args.shuffle, epochs=args.epochs,
+                              shuffle_learning=args.shuffle_learning
+                              )
 
     fname = get_filename(structure, functions)
     print(f"Training {fname}")

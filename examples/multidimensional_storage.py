@@ -4,7 +4,7 @@ import torch.optim as optim
 import numpy as np
 import math
 import gc
-
+import random
 
 import sys  # noqa
 sys.path.append("../")  # noqa
@@ -216,6 +216,8 @@ def train_net(structure, functions):
     # list_tensors()
     # list_modules()
     for epoch in range(epochs):
+        if functions.shuffle_learning:
+            random.shuffle(indices)
         for idx in indices:
             optimizer.zero_grad()
             output = model_analytic(functions.x_tensor, noise_patterns[idx])
@@ -255,7 +257,7 @@ def sine_pfa(x, n_phase=1, n_freq=None, n_amp=None, shuffle=False):
     # print(f"before squeeze {vals.shape}")
     if len(tosqueeze) > 0:
         vals = np.squeeze(vals, axis=tuple(tosqueeze))
-        print(f"after squeeze {vals.shape}")
+        # print(f"after squeeze {vals.shape}")
     if shuffle:
         shape = tuple(vals.shape)
         vals = vals.reshape(-1, shape[-2], shape[-1])
@@ -267,8 +269,9 @@ def sine_pfa(x, n_phase=1, n_freq=None, n_amp=None, shuffle=False):
 
 
 class SineFunctions:
-    def __init__(self, shape, shuffle=False, epochs=1000):
+    def __init__(self, shape, shuffle=False, epochs=1000, shuffle_learning=False):
         self.shuffle = shuffle
+        self.shuffle_learning = shuffle_learning
         self.shape = tuple(shape)
         self.x = np.linspace(-2 * np.pi, 2 * np.pi, 200).reshape(-1, 1)
         self.x_tensor = torch.tensor(self.x, dtype=torch.float32)
