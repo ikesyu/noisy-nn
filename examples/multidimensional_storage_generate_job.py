@@ -16,6 +16,7 @@ def get_job_string(structure, functions, cuda):
         f"--noise_structure {spaced_list(structure.noise_structure)}",
         f"--function_structure {spaced_list(functions.shape)}",
         bool_param("shuffle", functions.shuffle),
+        bool_param("shuffle_learning", functions.shuffle_learning),
         bool_param("cuda", cuda),
         f"--epochs {functions.epochs}",
         f"--activation_ratio {structure.activation_ratio}"
