@@ -101,10 +101,20 @@ def retrieve(structure, functions):
         return {"model": None, "losses": [np.nan]}
 
 
-def unidim_comparison():
-    structure = Structure([100])
+experiments = {"first":
+               [([100], 101), ([100, 100], 11), ([20, 20, 20], 11)],
+               "two":
+               [([2**6], 2**6+1),
+                ([2**3, 2**3], 2**3+1),
+                ([2**2, 2**2, 2**2], 2**2+1)]
+               }
+
+
+def unidim_comparison(expid="first"):
+    exper = experiments[expid][0]
+    structure = Structure(exper[0])
     losses = {sl: {s: [] for s in [False, True]} for sl in [False, True]}
-    nfuncs = range(1, 101)
+    nfuncs = range(1, exper[1])
     for shuffle_learning in [True, False]:
         for shuffle in [True, False]:
             for i in nfuncs:
@@ -129,10 +139,11 @@ def unidim_comparison():
     # plt.show()
 
 
-def bidim_comparison():
-    structure = Structure([100, 100])
+def bidim_comparison(expid="first"):
+    exper = experiments[expid][1]
+    structure = Structure(exper[0])
     losses = {True: [], False: []}
-    nfuncs = range(1, 11)
+    nfuncs = range(1, exper[1])
     for shuffle in [True, False]:
         for i in nfuncs:
             function = SineFunctions([i, i], epochs=20000//i, shuffle=shuffle)
@@ -149,10 +160,11 @@ def bidim_comparison():
     plt.close()
 
 
-def tridim_comparison():
-    structure = Structure([20, 20, 20])
+def tridim_comparison(expid="first"):
+    exper = experiments[expid][2]
+    structure = Structure(exper[0])
     losses = {True: [], False: []}
-    nfuncs = range(1, 11)
+    nfuncs = range(1, exper[1])
     for shuffle in [True, False]:
         for i in nfuncs:
             function = SineFunctions(
@@ -170,6 +182,7 @@ def tridim_comparison():
     plt.close()
 
 
-unidim_comparison()
-bidim_comparison()
-tridim_comparison()
+expid = "two"
+unidim_comparison(expid)
+bidim_comparison(expid)
+tridim_comparison(expid)
