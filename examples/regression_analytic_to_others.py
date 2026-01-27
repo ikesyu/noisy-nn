@@ -1,16 +1,24 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
+import sys  # noqa
+sys.path.append("../")  # noqa
+
+
 import matplotlib.pyplot as plt
-
-import sys
-sys.path.append("../")
-
-import nnn.noise as noise #from nnn import noise
+import numpy as np
+import torch.optim as optim
+import torch.nn as nn
+import torch
 from nnn import activation
 from nnn import layer
 from nnn import model
+import nnn.noise as noise  # from nnn import noise
+import time
+
+start_time = time.time()
+
+
+if torch.cuda.is_available():
+    torch.set_default_device('cpu')
+
 
 # データセットの作成
 x = np.linspace(-2 * np.pi, 2 * np.pi, 1000).reshape(-1, 1)
@@ -20,6 +28,8 @@ y = np.sin(x)
 x_tensor = torch.tensor(x, dtype=torch.float32)
 y_tensor = torch.tensor(y, dtype=torch.float32)
 
+print(f"Tensor device: {x_tensor.device}")
+# Output will be 'cpu' or 'cuda:0' (or similar)
 # モデルのインスタンス化
 model_analytic = model.SimpleNNNAnalytic()
 
@@ -34,7 +44,7 @@ for epoch in range(epochs):
     optimizer.zero_grad()
     output = model_analytic(x_tensor)
     loss = criterion(output, y_tensor)
-    print("\r"+f"loss: {loss}",end="")
+    print("\r"+f"loss: {loss}", end="")
     loss.backward()
     optimizer.step()
 print(".")
@@ -43,7 +53,7 @@ print("Training ends")
 # サンプリングモデルのインスタンス化と重みのコピー
 model_sample = model.SimpleNNNSample()
 for i in range(len(model_analytic.fcs)):
-  model_sample.fcs[i].load_state_dict(model_analytic.fcs[i].state_dict())
+    model_sample.fcs[i].load_state_dict(model_analytic.fcs[i].state_dict())
 
 """ # モデルパラメータの緩和
 std=1e-3
@@ -64,7 +74,7 @@ for epoch in range(epochs):
     optimizer.zero_grad()
     output = model_sample(x_tensor)
     loss = criterion(output, y_tensor)
-    print("\r"+f"loss: {loss}",end="")
+    print("\r"+f"loss: {loss}", end="")
     loss.backward()
     optimizer.step()
 print(".")
@@ -74,7 +84,7 @@ print("Training ends")
 # 統計量モデルのインスタンス化と重みのコピー
 model_statistic = model.SimpleNNNStatistic()
 for i in range(len(model_analytic.fcs)):
-  model_statistic.fcs[i].load_state_dict(model_analytic.fcs[i].state_dict())
+    model_statistic.fcs[i].load_state_dict(model_analytic.fcs[i].state_dict())
 
 """ # モデルパラメータの緩和
 std=1e-3
@@ -95,23 +105,32 @@ for epoch in range(epochs):
     optimizer.zero_grad()
     output = model_statistic(x_tensor)
     loss = criterion(output, y_tensor)
-    print("\r"+f"loss: {loss}",end="")
+    print("\r"+f"loss: {loss}", end="")
     loss.backward()
     optimizer.step()
 print(".")
 print("Training ends")
-  
+
 # 予測
-y_pred = model_analytic(x_tensor).detach().numpy()
-y_pred_sample = model_sample(x_tensor).detach().numpy()
-y_pred_statistic = model_statistic(x_tensor).detach().numpy()
+y_pred = model_analytic(x_tensor).detach().cpu().numpy()
+y_pred_sample = model_sample(x_tensor).detach().cpu().numpy()
+y_pred_statistic = model_statistic(x_tensor).detach().cpu().numpy()
+
+
+end_time = time.time()
+elapsed_time = end_time - start_time
+print(f"Elapsed time (seconds): {elapsed_time:.4f}")
+
 
 # 可視化
 plt.figure(figsize=(8, 6))
 plt.plot(x, y, label="True sin(x)", color='black')
-plt.plot(x, y_pred_sample, label="NN Approximation (Sampling-base)", color='red', alpha=0.3, linestyle="dashed")
-plt.plot(x, y_pred_statistic, label="NN Approximation (Stats-base)", color='blue', alpha=0.3, linestyle="dashed")
-plt.plot(x, y_pred, label="NN Approximation", color='orange', linestyle="dashed")
+plt.plot(x, y_pred_sample, label="NN Approximation (Sampling-base)",
+         color='red', alpha=0.3, linestyle="dashed")
+plt.plot(x, y_pred_statistic, label="NN Approximation (Stats-base)",
+         color='blue', alpha=0.3, linestyle="dashed")
+plt.plot(x, y_pred, label="NN Approximation",
+         color='orange', linestyle="dashed")
 plt.legend()
 plt.title("Approximation of sin(x) using a Feedforward Neural Network")
 plt.xlabel("x")

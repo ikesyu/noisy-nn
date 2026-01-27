@@ -117,14 +117,15 @@ def unidim_comparison():
         for shuffle in [True, False]:
             place = "shuffled" if shuffle else "ordered"
             learn = "random" if shuffle_learning else "ordered"
-            plt.plot(nfuncs, losses[shuffle_learning][shuffle], label=f"{
-                     place} location, {learn} learning")
+            plt.plot(nfuncs, losses[shuffle_learning][shuffle],
+                     label=f"{place} location, {learn} learning")
     plt.xlabel("Number of functions")
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
     plt.savefig("../fig/unidim_comparison.pdf")
+    plt.close()
     # plt.show()
 
 
@@ -145,6 +146,7 @@ def bidim_comparison():
     plt.grid(True)
     plt.legend()
     plt.savefig("../fig/bidim_comparison.pdf")
+    plt.close()
 
 
 def tridim_comparison():
@@ -165,6 +167,7 @@ def tridim_comparison():
     plt.grid(True)
     plt.legend()
     plt.savefig("../fig/tridim_comparison.pdf")
+    plt.close()
 
 
 unidim_comparison()
