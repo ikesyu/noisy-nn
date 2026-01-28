@@ -105,13 +105,18 @@ experiments = {"first":
                [([100], 101), ([100, 100], 11), ([20, 20, 20], 11)],
                "two":
                [([2**6], 2**6+1),
-                ([2**3, 2**3], 2**4+1),
-                ([2**2, 2**2, 2**2], 2**3+1)]
+                ([2**3, 2**3], 2**5+1),
+                ([2**2, 2**2, 2**2], 2**4+1)],
+               "three":
+               [([3**6], 3**6+1),
+                ([3**3, 3**3], 3**5+1),
+                ([3**2, 3**2, 3**2], 3**4+1)],
                }
 
 
-def unidim_comparison(expid="first"):
-    exper = experiments[expid][0]
+def multidim_comparison(expid="first", dim=1):
+    exper = experiments[expid][dim-1]
+    print("experiment ", exper)
     structure = Structure(exper[0])
     losses = {sl: {s: [] for s in [False, True]} for sl in [False, True]}
     nfuncs = range(1, exper[1])
@@ -119,7 +124,7 @@ def unidim_comparison(expid="first"):
         for shuffle in [True, False]:
             for i in nfuncs:
                 function = SineFunctions(
-                    [i], epochs=20000//i, shuffle=shuffle, shuffle_learning=shuffle_learning)
+                    [i]*dim, epochs=20000//i, shuffle=shuffle, shuffle_learning=shuffle_learning)
                 loss = retrieve(structure, function)["losses"]
                 losses[shuffle_learning][shuffle].append(np.max(loss))
 
@@ -134,9 +139,13 @@ def unidim_comparison(expid="first"):
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.savefig(f"../fig/unidim_comparison_{expid}.pdf")
+    plt.savefig(f"../fig/dim{dim}_comparison_{expid}.pdf")
     plt.close()
     # plt.show()
+
+
+def unidim_comparison(expid="first"):
+    multidim_comparison(expid, 1)
 
 
 def bidim_comparison(expid="first"):
@@ -183,6 +192,8 @@ def tridim_comparison(expid="first"):
 
 
 expid = "two"
-unidim_comparison(expid)
-bidim_comparison(expid)
-tridim_comparison(expid)
+for i in range(1, 4):
+    multidim_comparison(expid, i)
+# unidim_comparison(expid)
+# bidim_comparison(expid)
+# tridim_comparison(expid)
