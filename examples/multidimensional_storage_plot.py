@@ -105,8 +105,8 @@ experiments = {"first":
                [([100], 101), ([100, 100], 11), ([20, 20, 20], 11)],
                "two":
                [([2**6], 2**6+1),
-                ([2**3, 2**3], 2**3+1),
-                ([2**2, 2**2, 2**2], 2**2+1)]
+                ([2**3, 2**3], 2**4+1),
+                ([2**2, 2**2, 2**2], 2**3+1)]
                }
 
 
@@ -134,7 +134,7 @@ def unidim_comparison(expid="first"):
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.savefig("../fig/unidim_comparison.pdf")
+    plt.savefig(f"../fig/unidim_comparison_{expid}.pdf")
     plt.close()
     # plt.show()
 
@@ -149,14 +149,14 @@ def bidim_comparison(expid="first"):
             function = SineFunctions([i, i], epochs=20000//i, shuffle=shuffle)
             loss = retrieve(structure, function)["losses"]
             losses[shuffle].append(np.max(loss))
-    plt.plot(nfuncs, losses[False], label="odered")
+    plt.plot(nfuncs, losses[False], label="ordered")
     plt.plot(nfuncs, losses[True], label="shuffled")
     plt.xlabel("Number of functions")
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.savefig("../fig/bidim_comparison.pdf")
+    plt.savefig(f"../fig/bidim_comparison_{expid}.pdf")
     plt.close()
 
 
@@ -171,14 +171,14 @@ def tridim_comparison(expid="first"):
                 [i, i, i], epochs=20000//i, shuffle=shuffle)
             loss = retrieve(structure, function)["losses"]
             losses[shuffle].append(np.max(loss))
-    plt.plot(nfuncs, losses[False], label="odered")
+    plt.plot(nfuncs, losses[False], label="ordered")
     plt.plot(nfuncs, losses[True], label="shuffled")
     plt.xlabel("Number of functions")
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.ylabel("Loss")
     plt.grid(True)
     plt.legend()
-    plt.savefig("../fig/tridim_comparison.pdf")
+    plt.savefig(f"../fig/tridim_comparison_{expid}.pdf")
     plt.close()
 
 
