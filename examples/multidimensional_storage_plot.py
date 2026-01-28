@@ -116,7 +116,7 @@ experiments = {"first":
 
 def multidim_comparison(expid="first", dim=1):
     exper = experiments[expid][dim-1]
-    print("experiment ", exper)
+    # print("experiment ", exper)
     structure = Structure(exper[0])
     losses = {sl: {s: [] for s in [False, True]} for sl in [False, True]}
     nfuncs = range(1, exper[1])
