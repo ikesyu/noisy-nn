@@ -7,6 +7,7 @@ from multidimensional_storage_generate_job import get_job_string
 
 from matplotlib.ticker import MaxNLocator
 from pathlib import Path
+from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions
 
 
 def set_colors(N):
@@ -87,14 +88,15 @@ def test_shape(structure, functions, shuffle=False):
 
 def test():
     set_cuda(True)
-    structure = Structure([100])
-    functions = SineFunctions([10], epochs=10000)
+    structure = Structure([2**2, 2**2, 2**2])
+    functions = SineFunctions([4, 4, 4], epochs=10000)
     test_shape(structure, functions)
 
 
 def retrieve(structure, functions):
     fname = get_filename(structure, functions)
     if Path(fname).is_file():
+        # print("# Loaded ", fname)
         return torch.load(fname, weights_only=False)
     else:
         print(get_job_string(structure, functions, cuda=True))
@@ -119,7 +121,7 @@ def multidim_comparison(expid="first", dim=1):
     # print("experiment ", exper)
     structure = Structure(exper[0])
     losses = {sl: {s: [] for s in [False, True]} for sl in [False, True]}
-    nfuncs = range(1, exper[1])
+    nfuncs = list(range(1, exper[1]))
     for shuffle_learning in [True, False]:
         for shuffle in [True, False]:
             for i in nfuncs:
@@ -191,9 +193,163 @@ def tridim_comparison(expid="first"):
     plt.close()
 
 
-expid = "two"
-for i in range(1, 4):
-    multidim_comparison(expid, i)
+def closest_factor_pair(n):
+    """
+    Return (a, b) with a >= b > 1 and a*b = n that minimizes (a - b).
+    If no such pair exists, return None.
+    """
+    if n < 4:
+        return None
+    import math
+    r = math.isqrt(n)
+    for b in range(r, 1, -1):
+        if n % b == 0:
+            a = n // b
+            return (a, b)  # a >= b by construction
+    return None
+
+
+def closest_factor_triple(n):
+    """
+    Return (a, b, c) with a >= b >= c > 1 and abc = n that makes the factors
+    as close as possible by minimizing (a-c, a-b, b-c). If none exists, return None.
+    """
+    if n < 8:
+        return None
+
+    import math
+
+    # safe integer cube root (floor)
+    c0 = int(round(n ** (1/3)))
+    while c0 ** 3 > n:
+        c0 -= 1
+    while (c0 + 1) ** 3 <= n:
+        c0 += 1
+
+    best = None
+    best_key = None
+
+    for c in range(c0, 1, -1):
+        if n % c != 0:
+            continue
+        m = n // c
+        r = math.isqrt(m)  # floor(sqrt(m))
+
+        # Need b in [c, r] so that a = m//b >= b
+        if r < c:
+            continue
+
+        b = None
+        for t in range(r, c - 1, -1):
+            if m % t == 0:
+                b = t
+                break
+        if b is None:
+            continue
+
+        a = m // b  # guaranteed integer
+        # a >= b by construction (b <= sqrt(m)), and b >= c by loop bounds
+
+        key = (a - c, a - b, b - c)
+        if best is None or key < best_key:
+            best = (a, b, c)
+            best_key = key
+            if key == (0, 0, 0):  # perfect cube case
+                break
+
+    return best
+
+
+def reshape_dims(li, dims):
+    if dims < len(li):
+        rem = int(np.prod(li[dims-1:]))
+        return tuple(li[:dims-1])+tuple([rem])
+    elif dims == len(li):
+        return li
+    else:
+        return tuple(li)+tuple([1]*(dims-len(li)))
+
+
+def function_factors(n, dim):
+    if dim == 1:
+        return [n]
+    if dim == 2:
+        return closest_factor_pair(n)
+    if dim == 3:
+        return closest_factor_triple(n)
+
+
+def function_shape(n, dimpatt):
+    dim = np.sum(dimpatt)
+    ns = function_factors(n, dim)
+    if ns is None:
+        return None, None
+    cs = []
+    i = 0
+    for v in dimpatt:
+        if v:
+            cs.append(ns[i])
+            i += 1
+        else:
+            cs.append(1)
+    return ns, cs
+
+
+def number_to_binary_list(n):
+    return [(n >> i) & 1 for i in range(3)]
+
+
+def multidim_fit(dimbin):
+    dimpatt = number_to_binary_list(dimbin)
+    for dim in range(1, 4):
+        structure = Structure([2**(6//dim)]*dim)
+        losses = {True: [], False: []}
+        nfuncs = []
+        for i in range(1, 28):
+
+            ns, cs = function_shape(i, dimpatt)
+            # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
+            if ns is None:
+                continue
+            nfuncs.append(i)
+            for shuffle in [True, False]:
+                function = TrineFunctions(construct_shape=cs,
+                                          present_shape=reshape_dims(ns, dim),
+                                          epochs=10000,
+                                          shuffle=shuffle, shuffle_learning=True)
+                loss = retrieve(structure, function)["losses"]
+                losses[shuffle].append(np.max(loss))
+        print(f"# {nfuncs=}")
+        plt.plot(nfuncs,  losses[False], ".-", label=f"dim {dim} ordered")
+        plt.plot(nfuncs,  losses[True], ".-", label=f"dim {dim} shuffled")
+    plt.xlabel("Number of functions")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    fs = [l for l, v in zip(["Phase", "Amplitude", "Shape"], dimpatt) if v]
+    plt.title(f"Function space {fs}")
+    plt.savefig(f"../fig/multidim_fit{dimbin}.pdf")
+    plt.close()
+
+
+# parameter_difficulty_comparison()
+for dimbin in range(1, 8):
+    multidim_fit(dimbin)
+
+# for i in range(1, 4):
+#    print(pack_dims([4, 3, 2], i))
+
+# for i in range(8**3):
+#    print(f"{i=}", closest_factor_pair(i), closest_factor_triple(i))
+# expid = "two"
+# for i in range(1, 4):
+#    multidim_comparison(expid, i)
 # unidim_comparison(expid)
 # bidim_comparison(expid)
 # tridim_comparison(expid)
+
+# test()
+
+
+# parameter_difficulty_comparison()

@@ -106,7 +106,8 @@ def gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False):
     """
     D = len(shape)
     out = torch.empty(*shape, dtype=torch.float32)
-    assert len(center) == D, "center must have one entry per dimension"
+    assert len(center) == D, f"center must have one entry per dimension {
+        shape=} {center=}"
 
     device, dtype = out.device, out.dtype
 
@@ -215,15 +216,32 @@ def train_net(structure, functions):
     indices = list(np.ndindex(yshape))
     # list_tensors()
     # list_modules()
+
+    best_loss = float('inf')
+    patience_counter = 0
+    patience = 10
+    min_delta = -1e-3
     for epoch in range(epochs):
         if functions.shuffle_learning:
             random.shuffle(indices)
+        loss_sum = 0
         for idx in indices:
             optimizer.zero_grad()
             output = model_analytic(functions.x_tensor, noise_patterns[idx])
             loss = criterion(output, functions.ys[idx])
             loss.backward()
             optimizer.step()
+            loss_sum += loss.item()
+        if epoch % 50 == 0:
+            print(f"{epoch=} {loss_sum=} delta={loss_sum-best_loss}")
+            if loss_sum - best_loss > min_delta:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch}")
+                    break
+            else:
+                best_loss = loss_sum
+                patience_counter = 0
 
     losses = []
     with torch.no_grad():
@@ -233,51 +251,6 @@ def train_net(structure, functions):
             losses.append(float(loss.item()))
 
     return model_analytic, losses
-
-
-def sine_pfa(x, n_phase=1, n_freq=None, n_amp=None, shuffle=False):
-    tosqueeze = []
-    if n_freq is None:
-        tosqueeze.append(1)
-        n_freq = 1
-    if n_amp is None:
-        tosqueeze.append(2)
-        n_amp = 1
-
-    phase = np.linspace(0, 2*np.pi, n_phase, endpoint=False)
-    freq = np.linspace(1, 2, n_freq)
-    amp = np.linspace(1, 2, n_amp)
-    # print(f"{phase=} {freq=} {amp=}")
-
-    vals = amp[None, None, :, None, None] * np.sin(
-        freq[None, :, None, None, None] * x[None, None, None, :, :] + phase[:, None, None, None, None])
-
-    assert np.min(vals.shape) > 0, "did you pass shuffle by value?"
-
-    # print(f"before squeeze {vals.shape}")
-    if len(tosqueeze) > 0:
-        vals = np.squeeze(vals, axis=tuple(tosqueeze))
-        # print(f"after squeeze {vals.shape}")
-    if shuffle:
-        shape = tuple(vals.shape)
-        vals = vals.reshape(-1, shape[-2], shape[-1])
-        p = np.random.permutation(vals.shape[0])
-        vals = vals[p, :, :]
-        vals = vals.reshape(shape)
-
-    return torch.tensor(vals, dtype=torch.float32)
-
-
-class SineFunctions:
-    def __init__(self, shape, shuffle=False, epochs=1000, shuffle_learning=False):
-        self.shuffle = shuffle
-        self.shuffle_learning = shuffle_learning
-        self.shape = tuple(shape)
-        self.x = np.linspace(-2 * np.pi, 2 * np.pi, 200).reshape(-1, 1)
-        self.x_tensor = torch.tensor(self.x, dtype=torch.float32)
-        self.ys = sine_pfa(self.x, *shape, shuffle=shuffle)
-        self.epochs = epochs
-    # threads_per_run = max(1, os.cpu_count()-2)
 
 
 # compare_active_count()
