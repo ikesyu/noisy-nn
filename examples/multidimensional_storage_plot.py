@@ -1,3 +1,4 @@
+from typing import Tuple
 import torch
 from multidimensional_storage import *
 import matplotlib.pyplot as plt
@@ -8,6 +9,9 @@ from multidimensional_storage_generate_job import get_job_string
 from matplotlib.ticker import MaxNLocator
 from pathlib import Path
 from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions
+
+import itertools
+from typing import Tuple, List
 
 
 def set_colors(N):
@@ -334,8 +338,8 @@ def multidim_fit(dimbin):
 
 
 # parameter_difficulty_comparison()
-for dimbin in range(1, 8):
-    multidim_fit(dimbin)
+# for dimbin in range(1, 8):
+#    multidim_fit(dimbin)
 
 # for i in range(1, 4):
 #    print(pack_dims([4, 3, 2], i))
@@ -353,3 +357,126 @@ for dimbin in range(1, 8):
 
 
 # parameter_difficulty_comparison()
+
+
+def get_neighbor_offsets(n_dims: int, include_self: bool = False) -> torch.Tensor:
+    """
+    Generate all neighbor offsets in n dimensions.
+    For n dims: produces 3^n - 1 neighbors (excluding self) or 3^n (including self)
+
+    Examples:
+    - 1D: 2 neighbors (left, right)
+    - 2D: 8 neighbors (3^2 - 1)
+    - 3D: 26 neighbors (3^3 - 1)
+    """
+    offsets = list(itertools.product([-1, 0, 1], repeat=n_dims))
+
+    if not include_self:
+        offsets = [o for o in offsets if any(x != 0 for x in o)]
+
+    return torch.tensor(offsets, dtype=torch.long)
+
+
+def compute_neighbor_mse_vectorized(table: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    spatial_dims = table.shape[:-1]
+    n_spatial_dims = len(spatial_dims)
+    func_dim_size = table.shape[-1]
+
+    offsets = get_neighbor_offsets(n_spatial_dims).to(table.device)
+    num_neighbors = offsets.shape[0]
+
+    # Create coordinate grids
+    coord_ranges = [torch.arange(s, device=table.device) for s in spatial_dims]
+    grids = torch.meshgrid(*coord_ranges, indexing='ij')
+    # Shape: (*spatial_dims, n_spatial_dims)
+    coords = torch.stack(grids, dim=-1)
+
+    # Expand coords for all neighbors: (*spatial_dims, num_neighbors, n_spatial_dims)
+    coords_expanded = coords.unsqueeze(-2).expand(*
+                                                  spatial_dims, num_neighbors, n_spatial_dims)
+
+    # Add offsets: (*spatial_dims, num_neighbors, n_spatial_dims)
+    neighbor_coords = coords_expanded + offsets
+
+    # Create validity mask
+    valid_mask = torch.ones(*spatial_dims, num_neighbors,
+                            dtype=torch.bool, device=table.device)
+
+    for dim in range(n_spatial_dims):
+        valid_mask &= (neighbor_coords[..., dim] >= 0) & (
+            neighbor_coords[..., dim] < spatial_dims[dim])
+    # Clamp for safe indexing
+    neighbor_coords = neighbor_coords.clone()
+    for dim in range(n_spatial_dims):
+        neighbor_coords[..., dim] = neighbor_coords[...,
+                                                    dim].clamp(0, spatial_dims[dim] - 1)
+
+    # Gather neighbor values
+    neighbor_coords_tuple = tuple(
+        neighbor_coords[..., dim].long() for dim in range(n_spatial_dims))
+    # (*spatial_dims, num_neighbors, func_dim_size)
+    neighbor_values = table[neighbor_coords_tuple]
+
+    # Expand original values for comparison
+    table_expanded = table.unsqueeze(-2).expand(*
+                                                spatial_dims, num_neighbors, func_dim_size)
+
+    # Compute MSE for each neighbor
+    mse_per_neighbor = torch.mean(
+        (table_expanded - neighbor_values) ** 2, dim=-1)
+
+    # Apply mask and average
+    mse_per_neighbor = mse_per_neighbor * valid_mask.float()
+    neighbor_counts = valid_mask.sum(dim=-1)
+
+    avg_mse = torch.where(
+        neighbor_counts > 0,
+        mse_per_neighbor.sum(dim=-1) / neighbor_counts.float(),
+        torch.zeros_like(neighbor_counts, dtype=table.dtype)
+    )
+
+    return avg_mse, neighbor_counts
+
+
+def neighbor_dist(dimbin):
+    dimpatt = number_to_binary_list(dimbin)
+    for dim in range(1, 4):
+        structure = Structure([2**(6//dim)]*dim)
+        losses = {True: [], False: []}
+        nfuncs = []
+        for i in range(1, 28):
+
+            ns, cs = function_shape(i, dimpatt)
+            # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
+            if ns is None:
+                continue
+            nfuncs.append(i)
+            for shuffle in [True, False]:
+                function = SquineFunctions(construct_shape=cs,
+                                           present_shape=reshape_dims(ns, dim),
+                                           epochs=10000,
+                                           shuffle=shuffle, shuffle_learning=True)
+                # loss = retrieve(structure, function)["losses"]
+
+                avg_mse, neighbor_counts = compute_neighbor_mse_vectorized(
+                    table=function.ys)
+
+                losses[shuffle].append(float(torch.mean(avg_mse)))
+        print(f"# {dim=} {function.ys.shape} {losses[False]=}")
+        # ls = ["-", "--", ":"][dim-1]
+        plt.plot(nfuncs,  losses[False], f".-", label=f"dim {dim} ordered")
+        plt.plot(nfuncs,  losses[True], f".:", label=f"dim {dim} shuffled")
+    plt.xlabel("Number of functions")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Neighbor MSE")
+    plt.grid(True)
+    plt.legend()
+    fs = [l for l, v in zip(["Phase", "Amplitude", "Shape"], dimpatt) if v]
+    plt.title(f"Function space {fs}")
+    plt.savefig(f"../fig/neighbordiff{dimbin}.pdf")
+    plt.close()
+
+
+for dimbin in range(1, 8):
+    neighbor_dist(dimbin)
