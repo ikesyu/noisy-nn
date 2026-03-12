@@ -11,7 +11,7 @@ from pathlib import Path
 from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions
 
 import itertools
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 
 def set_colors(N):
@@ -358,19 +358,34 @@ def multidim_fit(dimbin):
 
 # parameter_difficulty_comparison()
 
-
-def get_neighbor_offsets(n_dims: int, include_self: bool = False) -> torch.Tensor:
+def get_neighbor_offsets(
+    n_dims: int,
+    include_self: bool = False,
+    include_diagonals: bool = True
+) -> torch.Tensor:
     """
     Generate all neighbor offsets in n dimensions.
-    For n dims: produces 3^n - 1 neighbors (excluding self) or 3^n (including self)
 
-    Examples:
-    - 1D: 2 neighbors (left, right)
-    - 2D: 8 neighbors (3^2 - 1)
-    - 3D: 26 neighbors (3^3 - 1)
+    Args:
+        n_dims: Number of dimensions
+        include_self: Whether to include the (0,0,...) offset
+        include_diagonals: If False, only direct face neighbors (1 axis changes at a time)
+
+    Examples (3D):
+        include_diagonals=True:  26 neighbors (full cube)
+        include_diagonals=False:  6 neighbors (only +x, -x, +y, -y, +z, -z)
     """
-    offsets = list(itertools.product([-1, 0, 1], repeat=n_dims))
-
+    if include_diagonals:
+        offsets = list(itertools.product([-1, 0, 1], repeat=n_dims))
+    else:
+        # Only one axis non-zero at a time
+        offsets = [(0,) * n_dims]  # start with self
+        for dim in range(n_dims):
+            for delta in [-1, 1]:
+                offset = [0] * n_dims
+                offset[dim] = delta
+                offsets.append(tuple(offset))
+        print(f"{offsets=}")
     if not include_self:
         offsets = [o for o in offsets if any(x != 0 for x in o)]
 
@@ -439,44 +454,194 @@ def compute_neighbor_mse_vectorized(table: torch.Tensor) -> Tuple[torch.Tensor, 
     return avg_mse, neighbor_counts
 
 
+def get_axis_combinations(n_dims: int) -> List[Tuple[int, ...]]:
+    """
+    Generate all non-empty combinations of axes.
+
+    For 3D: [(0,), (1,), (2,), (0,1), (0,2), (1,2), (0,1,2)]
+    """
+    combinations = []
+
+    for r in range(1, n_dims + 1):
+        for axes in itertools.combinations(range(n_dims), r):
+            combinations.append(axes)
+
+    return combinations
+
+
+def get_offsets_for_axes(
+    n_dims: int,
+    active_axes: Tuple[int, ...],
+    include_diagonals: bool = False
+) -> torch.Tensor:
+    """
+    Get neighbor offsets where ONLY the specified axes are non-zero.
+
+    Args:
+        n_dims: Number of dimensions
+        active_axes: Which axes can be non-zero
+        include_diagonals: If False, only one axis changes at a time
+
+    Examples (3D, active_axes=(0, 1)):
+        include_diagonals=True:
+            [[-1, -1, 0], [-1, 1, 0], [1, -1, 0], [1, 1, 0]]  # 4 diagonals
+
+        include_diagonals=False:
+            [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0]]    # 4 face neighbors
+    """
+    if include_diagonals:
+        choices = []
+        for dim in range(n_dims):
+            if dim in active_axes:
+                choices.append([-1, 1])
+            else:
+                choices.append([0])
+        offsets = list(itertools.product(*choices))
+    else:
+        # Only one active axis non-zero at a time
+        offsets = []
+        for dim in active_axes:
+            for delta in [-1, 1]:
+                offset = [0] * n_dims
+                offset[dim] = delta
+                offsets.append(tuple(offset))
+
+    return torch.tensor(offsets, dtype=torch.long)
+
+
+def compute_neighbor_mse_by_axis(table: torch.Tensor, include_diagonals: bool = True) -> Dict[Tuple[int, ...], Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Compute average MSE to neighbors, decomposed by axis combinations.
+
+    Args:
+        table: Tensor of shape (*spatial_dims, func_dim_size)
+
+    Returns:
+        Dict mapping axis tuple to (avg_mse, neighbor_counts) tensors
+        e.g., {(0,): (mse_x, counts_x), (0,1): (mse_xy, counts_xy), ...}
+    """
+    spatial_dims = table.shape[:-1]
+    n_spatial_dims = len(spatial_dims)
+    func_dim_size = table.shape[-1]
+
+    axis_combinations = get_axis_combinations(n_spatial_dims)
+    results = {}
+
+    # Create coordinate grids once
+    coord_ranges = [torch.arange(s, device=table.device) for s in spatial_dims]
+    grids = torch.meshgrid(*coord_ranges, indexing='ij')
+    coords = torch.stack(grids, dim=-1)
+
+    for active_axes in axis_combinations:
+        offsets = get_offsets_for_axes(
+            n_spatial_dims, active_axes, include_diagonals=include_diagonals).to(table.device)
+        num_neighbors = offsets.shape[0]
+
+        coords_expanded = coords.unsqueeze(-2).expand(
+            *spatial_dims, num_neighbors, n_spatial_dims
+        )
+
+        neighbor_coords = coords_expanded + offsets
+
+        valid_mask = torch.ones(
+            *spatial_dims, num_neighbors, dtype=torch.bool, device=table.device
+        )
+
+        for dim in range(n_spatial_dims):
+            valid_mask &= (neighbor_coords[..., dim] >= 0) & \
+                          (neighbor_coords[..., dim] < spatial_dims[dim])
+
+        neighbor_coords_clamped = neighbor_coords.clone()
+        for dim in range(n_spatial_dims):
+            neighbor_coords_clamped[..., dim] = neighbor_coords_clamped[..., dim].clamp(
+                0, spatial_dims[dim] - 1
+            )
+
+        neighbor_coords_tuple = tuple(
+            neighbor_coords_clamped[..., dim].long() for dim in range(n_spatial_dims)
+        )
+        neighbor_values = table[neighbor_coords_tuple]
+
+        table_expanded = table.unsqueeze(-2).expand(
+            *spatial_dims, num_neighbors, func_dim_size
+        )
+
+        mse_per_neighbor = torch.mean(
+            (table_expanded - neighbor_values) ** 2, dim=-1)
+
+        mse_per_neighbor = mse_per_neighbor * valid_mask.float()
+        neighbor_counts = valid_mask.sum(dim=-1)
+
+        avg_mse = torch.where(
+            neighbor_counts > 0,
+            mse_per_neighbor.sum(dim=-1) / neighbor_counts.float(),
+            torch.zeros_like(neighbor_counts, dtype=table.dtype)
+        )
+
+        results[active_axes] = (avg_mse, neighbor_counts)
+
+    return results
+
+
 def neighbor_dist(dimbin):
+    for func in [SquineFunctions, TrineFunctions]:
+        for diag in [False, True]:
+            dimpatt = number_to_binary_list(dimbin)
+            dimnames = ["Phase", "Amplitude", "Shape"]
+            for dim in range(1, 4):
+                structure = Structure([2**(6//dim)]*dim)
+                losses = {}
+                nfuncs = []
+                for i in range(1, 28):
+
+                    ns, cs = function_shape(i, dimpatt)
+                    # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
+                    if ns is None:
+                        continue
+                    # ns = ns[::-1]
+                    # cs = cs[::-1]
+                    nfuncs.append(i)
+                    for shuffle in [True, False]:
+                        function = func(construct_shape=cs,
+                                        present_shape=reshape_dims(
+                                            ns, dim),
+                                        epochs=10000,
+                                        shuffle=shuffle, shuffle_learning=True)
+                        # loss = retrieve(structure, function)["losses"]
+                        # print(function.ys.shape)
+                        dic = compute_neighbor_mse_by_axis(
+                            function.ys.squeeze(-1), diag)
+                        # print(f"{dic.keys()=}")
+                        for k, (v, n) in dic.items():
+                            # print(f"{losses.get((shuffle, k), [])=}")
+                            losses.setdefault((shuffle, k), []).append(
+                                float(torch.mean(v)))
+
+                # ls = ["-", "--", ":"][dim-1]
+                for k, v in losses.items():
+                    # print(f"{k=}")
+                    if dim == 3 and k[0] is False:
+                        plt.plot(nfuncs,  v, f".-", label=f"dim {dim} ax{k}")
+
+            plt.xlabel("Number of functions")
+            plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+            plt.ylabel("Neighbor MSE")
+            plt.grid(True)
+            plt.legend()
+            fs = [l for l, v in zip(dimnames, dimpatt) if v]
+            plt.title(f"Function space {fs}")
+            plt.savefig(
+                f"../fig/neighbordiff_{function.function_type}_{dimbin}_{diag}.pdf")
+            plt.close()
+
+
+# for dimbin in range(1, 8):
+
+neighbor_dist(7)
+
+for dimbin in range(7, 8):
     dimpatt = number_to_binary_list(dimbin)
-    for dim in range(1, 4):
-        structure = Structure([2**(6//dim)]*dim)
-        losses = {True: [], False: []}
-        nfuncs = []
-        for i in range(1, 28):
-
-            ns, cs = function_shape(i, dimpatt)
-            # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
-            if ns is None:
-                continue
-            nfuncs.append(i)
-            for shuffle in [True, False]:
-                function = SquineFunctions(construct_shape=cs,
-                                           present_shape=reshape_dims(ns, dim),
-                                           epochs=10000,
-                                           shuffle=shuffle, shuffle_learning=True)
-                # loss = retrieve(structure, function)["losses"]
-
-                avg_mse, neighbor_counts = compute_neighbor_mse_vectorized(
-                    table=function.ys)
-
-                losses[shuffle].append(float(torch.mean(avg_mse)))
-        print(f"# {dim=} {function.ys.shape} {losses[False]=}")
-        # ls = ["-", "--", ":"][dim-1]
-        plt.plot(nfuncs,  losses[False], f".-", label=f"dim {dim} ordered")
-        plt.plot(nfuncs,  losses[True], f".:", label=f"dim {dim} shuffled")
-    plt.xlabel("Number of functions")
-    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
-    plt.ylabel("Neighbor MSE")
-    plt.grid(True)
-    plt.legend()
-    fs = [l for l, v in zip(["Phase", "Amplitude", "Shape"], dimpatt) if v]
-    plt.title(f"Function space {fs}")
-    plt.savefig(f"../fig/neighbordiff{dimbin}.pdf")
-    plt.close()
-
-
-for dimbin in range(1, 8):
-    neighbor_dist(dimbin)
+    for i in range(1, 28):
+        ns, cs = function_shape(i, dimpatt)
+        # if i == 18:
+        print(f"# {dimbin=} {i=} {dimpatt=} {ns=} {cs=}")

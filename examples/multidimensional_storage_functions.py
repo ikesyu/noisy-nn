@@ -88,7 +88,8 @@ def sine_like_functions(x, n_phase, n_amp, n_alpha, func):
 
     for idx in indices:
         f = amp[idx[1]]*func(x+phase[idx[0]], squareness[idx[2]])
-        # f = [idx[0], idx[1], idx[2]]
+        # f = np.hstack([[idx[0], idx[1], idx[2]],
+        #               np.zeros(200-3)]).reshape(200, 1)
         funcs.append(f)
 
     return funcs
