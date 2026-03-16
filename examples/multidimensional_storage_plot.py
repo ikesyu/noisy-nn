@@ -337,6 +337,40 @@ def multidim_fit(dimbin):
     plt.close()
 
 
+def activation_swipe(dimbin):
+    dimpatt = number_to_binary_list(dimbin)
+    acts = list(np.linspace(0.1, 0.9, 11))
+
+    for dim in range(1, 4):
+        losses = {True: [], False: []}
+        for act in acts:
+            structure = Structure([2**(6//dim)]*dim, act)
+            for i in [27]:
+                ns, cs = function_shape(i, dimpatt)
+                # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
+                if ns is None:
+                    continue
+                for shuffle in [False]:
+                    function = SquineFunctions(construct_shape=cs,
+                                               present_shape=reshape_dims(
+                                                   ns, dim),
+                                               epochs=10000,
+                                               shuffle=shuffle, shuffle_learning=True)
+                    loss = retrieve(structure, function)["losses"]
+                    losses[shuffle].append(np.random.rand())  # np.max(loss))
+        plt.plot(acts,  losses[False], ".-", label=f"dim {dim} ordered")
+        # plt.plot(nfuncs,  losses[True], ".-", label=f"dim {dim} shuffled")
+        plt.xlabel("Activation ratio")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    fs = [l for l, v in zip(["Phase", "Amplitude", "Shape"], dimpatt) if v]
+    plt.title(f"Function space {fs}")
+    plt.savefig(f"../fig/activation_swipe{dimbin}.pdf")
+    plt.close()
+
+
 # parameter_difficulty_comparison()
 # for dimbin in range(1, 8):
 #    multidim_fit(dimbin)
@@ -637,11 +671,14 @@ def neighbor_dist(dimbin):
 
 # for dimbin in range(1, 8):
 
-neighbor_dist(7)
+# neighbor_dist(7)
 
-for dimbin in range(7, 8):
-    dimpatt = number_to_binary_list(dimbin)
-    for i in range(1, 28):
-        ns, cs = function_shape(i, dimpatt)
-        # if i == 18:
-        print(f"# {dimbin=} {i=} {dimpatt=} {ns=} {cs=}")
+# for dimbin in range(7, 8):
+#     dimpatt = number_to_binary_list(dimbin)
+#     for i in range(1, 28):
+#         ns, cs = function_shape(i, dimpatt)
+#         # if i == 18:
+#         print(f"# {dimbin=} {i=} {dimpatt=} {ns=} {cs=}")
+
+
+activation_swipe(7)
