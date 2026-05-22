@@ -1,9 +1,59 @@
 import torch
 import torch.nn as nn
+from typing import Sequence
+from typing import Optional
 
 from . import noise
 from . import activation
 from . import layer
+
+
+class SimpleNNNBase(nn.Module):
+    """Sample-level NNN hidden base without the final linear output layer.
+    Input:
+        x: [N, D_in]
+    Output:
+        z_samples: [N, T, D_hidden_last]
+    """
+
+    def __init__(self, structure: Sequence[int] = (1, 64, 64), std: float = 0.6,
+                 h: float = 0.15, t: int = 64):
+        super().__init__()
+        if len(structure) < 2:
+            raise ValueError("structure must contain input dim and at least one hidden dim.")
+
+        self.structure = list(structure)
+        self.std = std
+        self.h = h
+        self.t = t
+
+        self.fcs = nn.ModuleList([
+            nn.Linear(pre, post, bias=True)
+            for pre, post in zip(self.structure[:-1], self.structure[1:])
+        ])
+        self.gaussian_crossing = nn.ModuleList([
+            layer.GaussianCrossingSampleLayer(std=self.std, h=self.h)
+            for _ in self.fcs
+        ])
+        self.sampled_layer = layer.SampleLayer(numT=self.t)
+
+    @property
+    def out_features(self) -> int:
+        return self.structure[-1]
+
+    def forward(self, x: torch.Tensor, stds: Optional[Sequence[float]] = None) -> torch.Tensor:
+        if stds is None:
+            stds = [self.std] * len(self.fcs)
+        if len(stds) != len(self.fcs):
+            raise ValueError("len(stds) must match the number of hidden layers.")
+
+        for i, fc in enumerate(self.fcs):
+            x = fc(x)
+            if i == 0:
+                # [N, H] -> [N, T, H]
+                x = self.sampled_layer(x)
+            x = self.gaussian_crossing[i](x, stds[i])
+        return x
 
 
 class SimpleNNN(nn.Module):
