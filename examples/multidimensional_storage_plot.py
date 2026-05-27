@@ -8,7 +8,7 @@ from multidimensional_storage_generate_job import get_job_string
 
 from matplotlib.ticker import MaxNLocator
 from pathlib import Path
-from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions
+from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions, PlainSineFunctions
 
 import itertools
 from typing import Tuple, List, Dict
@@ -337,6 +337,41 @@ def multidim_fit(dimbin):
     plt.close()
 
 
+def multidim_fit_freq(dimbin):
+    dimpatt = number_to_binary_list(dimbin)
+    for dim in range(1, 3):
+        structure = Structure([2**(6//dim)]*dim)
+        losses = {True: [], False: []}
+        nfuncs = []
+        for i in range(1, 101):
+
+            ns, cs = function_shape(i, dimpatt)
+            # print(f"# {dimbin=} {dimpatt=} {ns=} {cs=}")
+            if ns is None:
+                continue
+            nfuncs.append(i)
+            for shuffle in [True, False]:
+                function = PlainSineFunctions(construct_shape=cs,
+                                              present_shape=reshape_dims(
+                                                  ns, dim),
+                                              epochs=10000,
+                                              shuffle=shuffle, shuffle_learning=True)
+                loss = retrieve(structure, function)["losses"]
+                losses[shuffle].append(np.max(loss))
+        print(f"# {nfuncs=}")
+        plt.plot(nfuncs,  losses[False], ".-", label=f"dim {dim} ordered")
+        plt.plot(nfuncs,  losses[True], ".-", label=f"dim {dim} shuffled")
+    plt.xlabel("Number of functions")
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    fs = [l for l, v in zip(["Phase", "Frequency", "Amplitude"], dimpatt) if v]
+    plt.title(f"Function space {fs}")
+    plt.savefig(f"../fig/multidim_fit_freq{dimbin}.pdf")
+    plt.close()
+
+
 def activation_swipe(dimbin):
     dimpatt = number_to_binary_list(dimbin)
     acts = list(np.linspace(0.1, 0.9, 11))
@@ -639,7 +674,7 @@ def neighbor_dist(dimbin):
                         function = func(construct_shape=cs,
                                         present_shape=reshape_dims(
                                             ns, dim),
-                                        epochs=10000,
+                                        epochs=1,  # 0000,
                                         shuffle=shuffle, shuffle_learning=True)
                         # loss = retrieve(structure, function)["losses"]
                         # print(function.ys.shape)
@@ -681,4 +716,7 @@ def neighbor_dist(dimbin):
 #         print(f"# {dimbin=} {i=} {dimpatt=} {ns=} {cs=}")
 
 
-activation_swipe(7)
+# activation_swipe(7)
+
+for dimbin in range(1, 4):
+    multidim_fit_freq(dimbin)

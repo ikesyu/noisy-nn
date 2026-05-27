@@ -2,7 +2,7 @@ import argparse
 import torch
 import numpy as np
 from multidimensional_storage import Structure,  train_net, set_cuda
-from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions
+from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions, PlainSineFunctions
 import time
 
 
@@ -99,6 +99,13 @@ if __name__ == "__main__":
                                    shuffle=args.shuffle, epochs=args.epochs,
                                    shuffle_learning=args.shuffle_learning
                                    )
+
+    elif args.function_type == "plainsine":
+        functions = PlainSineFunctions(construct_shape=args.construct_structure,
+                                       present_shape=args.function_structure,
+                                       shuffle=args.shuffle, epochs=args.epochs,
+                                       shuffle_learning=args.shuffle_learning
+                                       )
 
     else:
         raise Exception(f"{args.function_type}:no such function type")

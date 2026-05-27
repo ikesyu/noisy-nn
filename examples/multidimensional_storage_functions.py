@@ -95,6 +95,25 @@ def sine_like_functions(x, n_phase, n_amp, n_alpha, func):
     return funcs
 
 
+def plain_sine(x, n_phase, n_freq, n_amp):
+    phase = np.linspace(0, 2*np.pi, n_phase, endpoint=False)
+    amp = np.linspace(1, 2, n_amp, endpoint=True)
+    freq = np.linspace(1, 2, n_freq, endpoint=True)
+
+    funcs = []
+    shape = (n_phase, n_freq, n_amp)
+
+    indices = list(gray_ndindex(shape))
+
+    for idx in indices:
+        f = amp[idx[2]]*np.sin(freq[idx[1]]*x+phase[idx[0]])
+        # f = np.hstack([[idx[0], idx[1], idx[2]],
+        #               np.zeros(200-3)]).reshape(200, 1)
+        funcs.append(f)
+
+    return funcs
+
+
 class SineLikeFunctions:
     def __init__(self, construct_shape, present_shape,
                  shuffle, epochs, shuffle_learning, function, name):
@@ -104,8 +123,12 @@ class SineLikeFunctions:
         self.shape = tuple(present_shape)
         self.x = np.linspace(-2 * np.pi, 2 * np.pi, 200).reshape(-1, 1)
         self.x_tensor = torch.tensor(self.x, dtype=torch.float32)
-        linear_ys = np.array(sine_like_functions(
-            self.x, *construct_shape, function))
+
+        if function == plain_sine:
+            linear_ys = np.array(plain_sine(self.x, *construct_shape))
+        else:
+            linear_ys = np.array(sine_like_functions(
+                self.x, *construct_shape, function))
         if (shuffle):
             p = np.random.permutation(len(linear_ys))
             linear_ys = linear_ys[p, :, :]
@@ -116,7 +139,7 @@ class SineLikeFunctions:
         indices = list(gray_ndindex(present_shape))
         if len(indices) != len(linear_ys):
             raise Exception(f"Mismatch in sizes {
-                            construct_shape=} {present_shape=}")
+                            construct_shape = } {present_shape = }")
         for idx, y in zip(indices, linear_ys):
             # print(f"{ys.shape=} {idx=} {ys[*idx, :]=} {y=}")
             ys[*idx, :] = y
@@ -135,6 +158,12 @@ class TrineFunctions(SineLikeFunctions):
     def __init__(self, construct_shape, present_shape, shuffle=False, epochs=1000, shuffle_learning=False):
         super().__init__(construct_shape, present_shape,
                          shuffle, epochs, shuffle_learning, triangle_sine, "trine")
+
+
+class PlainSineFunctions(SineLikeFunctions):
+    def __init__(self, construct_shape, present_shape, shuffle=False, epochs=1000, shuffle_learning=False):
+        super().__init__(construct_shape, present_shape,
+                         shuffle, epochs, shuffle_learning, plain_sine, "plainsine")
 
 
 # present_shape = [8, 1]
