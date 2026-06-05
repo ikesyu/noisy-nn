@@ -718,5 +718,6 @@ def neighbor_dist(dimbin):
 
 # activation_swipe(7)
 
-for dimbin in range(1, 4):
-    multidim_fit_freq(dimbin)
+if __name__ == "__main__":
+    for dimbin in range(1, 4):
+        multidim_fit_freq(dimbin)

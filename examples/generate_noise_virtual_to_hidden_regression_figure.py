@@ -4,6 +4,7 @@ from multidimensional_storage_functions import SineFunctions, SquineFunctions, T
 from multidimensional_storage import Structure, fractional_index, noise_pattern
 import argparse
 import os
+import random
 import sys
 
 import matplotlib.pyplot as plt
@@ -114,13 +115,39 @@ def move_stdvecs_to_device(stdvecs, device):
     return [v.to(device) for v in stdvecs]
 
 
-def retrieve(structure, functions):
+def set_global_seed(seed):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def retrieve(structure, functions, seed=None):
     # Same cache behavior as multidimensional_storage_plot.retrieve.
-    fname = get_filename(structure, functions)
+    fname = get_filename(structure, functions, seed=seed)
     if Path(fname).is_file():
         return torch.load(fname, weights_only=False, map_location=torch.device('cpu'))
-    print(get_job_string(structure, functions, cuda=False))
+    seed_arg = f" --seed {int(seed)}" if seed is not None else ""
+    print(get_job_string(structure, functions, cuda=False) + seed_arg)
     return {"model": None, "losses": [np.nan]}
+
+
+def normalized_coord_label(idx, shape):
+    parts = []
+    for i, n in zip(idx, shape):
+        den = max(n - 1, 1)
+        parts.append(f"{i}/{den} ({i / den:.3f})")
+    if len(parts) == 1:
+        return f"c={parts[0]}"
+    return "c=(" + ", ".join(parts) + ")"
+
+
+def cached_target_for_idx(result, idx):
+    ys = result.get("ys")
+    if ys is None:
+        return None
+    if isinstance(ys, torch.Tensor):
+        return ys[idx].detach().cpu().numpy()
+    return np.asarray(ys[idx])
 
 
 def map_present_to_construct(functions, net=None, structure=None):
@@ -222,7 +249,11 @@ def main():
     parser.add_argument(
         "--squash", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
+
+    if args.seed is not None:
+        set_global_seed(args.seed)
 
     if args.example_2d:
         # Preset matching common cached 2D runs.
@@ -241,16 +272,16 @@ def main():
         args.noise_structure = [64]
         args.function_structure = [100]
         args.construct_structure = [10, 10, 1]
-        if len(args.index_a) == 1:
-            args.index_a = [1, 8]
-        if len(args.index_b) == 1:
-            args.index_b = [6, 3]
+
+        args.index_a = [1*10+8]
+        args.index_b = [6*10+3]
 
     structure = Structure(args.noise_structure,
                           activation_ratio=args.activation_ratio)
     functions = build_functions(args)
 
-    result = retrieve(structure, functions)
+    cache_seed = args.seed if args.shuffle else None
+    result = retrieve(structure, functions, seed=cache_seed)
     net = result["model"]
     if net is None:
         # Match multidimensional_storage_plot behavior: emit missing-job command and exit.
@@ -267,10 +298,9 @@ def main():
     idx_a = parse_index(args.index_a, functions.shape)
     idx_b = parse_index(args.index_b, functions.shape)
 
-    present_to_construct = map_present_to_construct(
-        functions, net=net, structure=structure)
-    cidx_a = present_to_construct[idx_a] if present_to_construct and idx_a in present_to_construct else None
-    cidx_b = present_to_construct[idx_b] if present_to_construct and idx_b in present_to_construct else None
+    present_to_construct = None
+    cidx_a = None
+    cidx_b = None
 
     stdvecs_a = noise_pattern(
         structure, fractional_index(idx_a, functions.shape))
@@ -285,6 +315,9 @@ def main():
         y_pred_b = net(x_tensor, stdvecs_b).detach().cpu().numpy()
 
     def target_for(idx, cidx):
+        cached = cached_target_for_idx(result, idx)
+        if cached is not None:
+            return cached
         # Prefer the construct function the model actually learned at this idx
         # (recovered from the model's output) over functions.ys[idx], because
         # the training shuffle isn't persisted in the cache.
@@ -295,9 +328,18 @@ def main():
             return np.asarray(candidates[k]).reshape(-1, 1)
         return functions.ys[idx].detach().cpu().numpy()
 
+    # Legacy fallback for old caches without stored ys.
+    if result.get("ys") is None:
+        present_to_construct = map_present_to_construct(
+            functions, net=net, structure=structure)
+        cidx_a = present_to_construct[idx_a] if present_to_construct and idx_a in present_to_construct else None
+        cidx_b = present_to_construct[idx_b] if present_to_construct and idx_b in present_to_construct else None
+
     y_true_a = target_for(idx_a, cidx_a)
     y_true_b = target_for(idx_b, cidx_b)
     x = functions.x
+    clabel_a = normalized_coord_label(idx_a, functions.shape)
+    clabel_b = normalized_coord_label(idx_b, functions.shape)
 
     def save_cropped_pdf(fig, pdf_path):
         fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
@@ -325,13 +367,13 @@ def main():
 
     fig_reg, ax_reg = plt.subplots(figsize=(7.2, 3.8), constrained_layout=True)
     ax_reg.plot(x, y_pred_a, "-", color="tab:blue", linewidth=2.0,
-                label="Network output A")
+                label=f"Network output ({clabel_a})")
     ax_reg.plot(x, y_pred_b, "-", color="tab:orange", linewidth=2.0,
-                label="Network output B")
+                label=f"Network output ({clabel_b})")
     ax_reg.plot(x, y_true_a, ".", color="darkblue", linewidth=2.0,
-                label="Target A")
+                label=f"Target ({clabel_a})")
     ax_reg.plot(x, y_true_b, ".", color="brown", linewidth=2.0,
-                label="Target B")
+                label=f"Target ({clabel_b})")
 
     ax_reg.set_xlabel("x")
     ax_reg.set_ylabel("y")
@@ -343,26 +385,30 @@ def main():
         os.path.dirname(__file__), "../fig"))
     os.makedirs(out_dir, exist_ok=True)
 
-    dims = f"{len(args.function_structure)}{len(args.noise_structure)}"
+    actualdims = [a for a in args.construct_structure if a != 1]
+
+    dims = f"{len(actualdims)}{len(args.noise_structure)}"
+    seed_suffix = f"_seed{args.seed}" if cache_seed is not None else ""
+    shuffle_suffix = "_shuffle" if args.shuffle else ""
     save_cropped_pdf(
         fig_va,
-        os.path.join(out_dir, f"regression_virtualA{dims}.pdf"),
+        os.path.join(out_dir, f"regression_virtualA{dims}{shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_vb,
-        os.path.join(out_dir, f"regression_virtualB{dims}.pdf"),
+        os.path.join(out_dir, f"regression_virtualB{dims}{shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_ha,
-        os.path.join(out_dir, f"regression_hiddenA{dims}.pdf"),
+        os.path.join(out_dir, f"regression_hiddenA{dims}{shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_hb,
-        os.path.join(out_dir, f"regression_hiddenB{dims}.pdf"),
+        os.path.join(out_dir, f"regression_hiddenB{dims}{shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_reg,
-        os.path.join(out_dir, f"regression_plot{dims}.pdf"),
+        os.path.join(out_dir, f"regression_plot{dims}{shuffle_suffix}{seed_suffix}.pdf"),
     )
 
     if args.show:

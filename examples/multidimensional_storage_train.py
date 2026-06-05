@@ -1,6 +1,7 @@
 import argparse
 import torch
 import numpy as np
+import random
 from multidimensional_storage import Structure,  train_net, set_cuda
 from multidimensional_storage_functions import SineFunctions, SquineFunctions, TrineFunctions, PlainSineFunctions
 import time
@@ -10,7 +11,7 @@ def underbar_list(li):
     return '_'.join([f"{n}" for n in li])
 
 
-def get_filename(structure, functions):
+def get_filename(structure, functions, seed=None):
     ns = underbar_list(structure.noise_structure)
     fs = underbar_list(functions.shape)
 
@@ -25,6 +26,8 @@ def get_filename(structure, functions):
         cs = underbar_list(functions.construct_shape)
         label += f"_t{functions.function_type}"
         label += f"_c{cs}"
+    if seed is not None:
+        label += f"_r{int(seed)}"
     fname = f"../data/multidim_{label}.pt"
     return fname
 
@@ -72,9 +75,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cuda", action=argparse.BooleanOptionalAction, default=True)
 
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Deterministic seed for shuffled function assignment and learning order')
+
     args = parser.parse_args()
     if args.construct_structure is None:
         args.construct_structure = args.function_structure
+
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
 
     set_cuda(args.cuda)
 
@@ -109,7 +120,7 @@ if __name__ == "__main__":
 
     else:
         raise Exception(f"{args.function_type}:no such function type")
-    fname = get_filename(structure, functions)
+    fname = get_filename(structure, functions, seed=args.seed)
     print(f"Training {fname}")
 
     start = time.perf_counter()
@@ -118,6 +129,8 @@ if __name__ == "__main__":
     print(f"Elapsed: {elapsed:.6f} s")
     print(f"max loss {np.max(losses)}")
 
-    torch.save({"model": model, "losses":
-                losses}, fname
-               )
+    torch.save({
+        "model": model,
+        "losses": losses,
+        "ys": functions.ys.detach().cpu(),
+    }, fname)
