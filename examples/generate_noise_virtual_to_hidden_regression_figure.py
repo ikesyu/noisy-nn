@@ -224,6 +224,11 @@ def pick_plainsine_indices(functions, net=None, structure=None):
     return None
 
 
+def gray_linear_index(idx_2d, shape_2d):
+    indices = list(gray_ndindex(shape_2d))
+    return indices.index(tuple(idx_2d))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Plot two cached noise patterns with dashed target and solid model output."
@@ -273,8 +278,20 @@ def main():
         args.function_structure = [100]
         args.construct_structure = [10, 10, 1]
 
-        args.index_a = [1*10+8]
-        args.index_b = [6*10+3]
+        shape_2d = (10, 10)
+
+        def squash_index_to_1d(index_vals, default_xy, default_scalar):
+            # If index is given as 2D coordinates, map through Gray/serpentine order.
+            if len(index_vals) == 2:
+                return [gray_linear_index(tuple(index_vals), shape_2d)]
+            # Keep squash defaults aligned with example_2d coordinates under
+            # Gray/serpentine ordering, not row-major flattening.
+            if len(index_vals) == 1 and index_vals == [default_scalar]:
+                return [gray_linear_index(default_xy, shape_2d)]
+            return index_vals
+
+        args.index_a = squash_index_to_1d(args.index_a, (1, 8), 1)
+        args.index_b = squash_index_to_1d(args.index_b, (6, 3), 3)
 
     structure = Structure(args.noise_structure,
                           activation_ratio=args.activation_ratio)
@@ -392,23 +409,28 @@ def main():
     shuffle_suffix = "_shuffle" if args.shuffle else ""
     save_cropped_pdf(
         fig_va,
-        os.path.join(out_dir, f"regression_virtualA{dims}{shuffle_suffix}{seed_suffix}.pdf"),
+        os.path.join(out_dir, f"regression_virtualA{dims}{
+                     shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_vb,
-        os.path.join(out_dir, f"regression_virtualB{dims}{shuffle_suffix}{seed_suffix}.pdf"),
+        os.path.join(out_dir, f"regression_virtualB{dims}{
+                     shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_ha,
-        os.path.join(out_dir, f"regression_hiddenA{dims}{shuffle_suffix}{seed_suffix}.pdf"),
+        os.path.join(out_dir, f"regression_hiddenA{dims}{
+                     shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_hb,
-        os.path.join(out_dir, f"regression_hiddenB{dims}{shuffle_suffix}{seed_suffix}.pdf"),
+        os.path.join(out_dir, f"regression_hiddenB{dims}{
+                     shuffle_suffix}{seed_suffix}.pdf"),
     )
     save_cropped_pdf(
         fig_reg,
-        os.path.join(out_dir, f"regression_plot{dims}{shuffle_suffix}{seed_suffix}.pdf"),
+        os.path.join(out_dir, f"regression_plot{dims}{
+                     shuffle_suffix}{seed_suffix}.pdf"),
     )
 
     if args.show:
