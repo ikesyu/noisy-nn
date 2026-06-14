@@ -9,6 +9,13 @@ Usage (from the examples/ directory):
         --idx_a 2 3 --idx_b 7 6 --n_steps 7 --epochs 5000 --show
 """
 
+from multidimensional_storage_functions import SineFunctions, plain_sine, gray_ndindex
+from multidimensional_storage import (
+    Structure,
+    noise_pattern,
+    noise_pattern_table,
+    fractional_index,
+)
 import argparse
 import os
 import random
@@ -24,17 +31,11 @@ from pathlib import Path
 
 sys.path.append("../")
 
-from multidimensional_storage import (
-    Structure,
-    noise_pattern,
-    noise_pattern_table,
-    fractional_index,
-)
-from multidimensional_storage_functions import SineFunctions, plain_sine, gray_ndindex
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def set_global_seed(seed):
     np.random.seed(seed)
@@ -80,23 +81,23 @@ def get_function_params(functions, idx):
     squeezed out) in this 2D case.
     """
     shape = functions.shape          # e.g. (10, 10)
-    ndim  = len(shape)
+    ndim = len(shape)
 
     params = {}
 
     # phase is always along axis 0
     n_phase = shape[0]
-    phases  = np.linspace(0, 2 * np.pi, n_phase, endpoint=False)
+    phases = np.linspace(0, 2 * np.pi, n_phase, endpoint=False)
     params["phase"] = float(phases[idx[0]])
 
     if ndim >= 2:
         n_freq = shape[1]
-        freqs  = np.linspace(1, 2, n_freq)
+        freqs = np.linspace(1, 2, n_freq)
         params["freq"] = float(freqs[idx[1]])
 
     if ndim >= 3:
         n_amp = shape[2]
-        amps  = np.linspace(1, 2, n_amp)
+        amps = np.linspace(1, 2, n_amp)
         params["amp"] = float(amps[idx[2]])
     else:
         params["amp"] = 1.0        # amplitude squeezed out → constant 1
@@ -140,17 +141,17 @@ def train_net_masked(structure, functions, mask_indices, epochs=5000, seed=None)
 
     indices = list(mask_indices)
 
-    best_loss    = float("inf")
+    best_loss = float("inf")
     patience_ctr = 0
-    patience     = 10
-    min_delta    = -1e-3
+    patience = 10
+    min_delta = -1e-3
 
     for epoch in range(epochs):
         random.shuffle(indices)
         loss_sum = 0.0
         for idx in indices:
             optimizer.zero_grad()
-            out  = net(functions.x_tensor, all_noise[idx])
+            out = net(functions.x_tensor, all_noise[idx])
             loss = criterion(out, functions.ys[idx])
             loss.backward()
             optimizer.step()
@@ -158,20 +159,21 @@ def train_net_masked(structure, functions, mask_indices, epochs=5000, seed=None)
 
         if epoch % 50 == 0:
             delta = loss_sum - best_loss
-            print(f"epoch={epoch:5d}  loss_sum={loss_sum:.6f}  delta={delta:.6f}")
+            print(
+                f"epoch={epoch:5d}  loss_sum={loss_sum:.6f}  delta={delta:.6f}")
             if delta > min_delta:
                 patience_ctr += 1
                 if patience_ctr >= patience:
                     print(f"Early stopping at epoch {epoch}")
                     break
             else:
-                best_loss    = loss_sum
+                best_loss = loss_sum
                 patience_ctr = 0
 
     losses = []
     with torch.no_grad():
         for idx in indices:
-            out  = net(functions.x_tensor, all_noise[idx])
+            out = net(functions.x_tensor, all_noise[idx])
             loss = criterion(out, functions.ys[idx])
             losses.append(float(loss.item()))
 
@@ -195,8 +197,8 @@ def interpolate_noise_2d(structure, grid_shape, idx_a, idx_b, n_steps):
     frac_a = np.array(fractional_index(idx_a, grid_shape))   # e.g. [0.2, 0.3]
     frac_b = np.array(fractional_index(idx_b, grid_shape))
 
-    positions   = np.linspace(0.0, 1.0, n_steps)
-    noise_list  = []
+    positions = np.linspace(0.0, 1.0, n_steps)
+    noise_list = []
 
     for t in positions:
         center = tuple((1 - t) * frac_a + t * frac_b)
@@ -215,7 +217,7 @@ def get_cache_path(grid_shape, noise_structure, activation_ratio,
     Return a deterministic path in ../data/ that encodes all parameters
     that affect the trained model.
     """
-    g  = "_".join(str(n) for n in grid_shape)
+    g = "_".join(str(n) for n in grid_shape)
     ns = "_".join(str(n) for n in noise_structure)
     ia = "_".join(str(i) for i in idx_a)
     ib = "_".join(str(i) for i in idx_b)
@@ -271,8 +273,8 @@ def main():
     set_global_seed(args.seed)
 
     grid_shape = tuple(args.grid)          # (10, 10)
-    idx_a      = tuple(args.idx_a)         # e.g. (1, 2)
-    idx_b      = tuple(args.idx_b)         # e.g. (7, 6)
+    idx_a = tuple(args.idx_a)         # e.g. (1, 2)
+    idx_b = tuple(args.idx_b)         # e.g. (7, 6)
 
     # ------------------------------------------------------------------
     # Validate indices
@@ -287,8 +289,10 @@ def main():
     # ------------------------------------------------------------------
     # Build functions (SineFunctions uses shape=(n_phase, n_freq) in 2D)
     # ------------------------------------------------------------------
-    structure = Structure(args.noise_structure, activation_ratio=args.activation_ratio)
-    functions = SineFunctions(list(grid_shape), shuffle=False, epochs=args.epochs)
+    structure = Structure(args.noise_structure,
+                          activation_ratio=args.activation_ratio)
+    functions = SineFunctions(
+        list(grid_shape), shuffle=False, epochs=args.epochs)
 
     # ------------------------------------------------------------------
     # Print parameters for the two chosen functions
@@ -317,7 +321,8 @@ def main():
     if not args.retrain and Path(cache_path).is_file():
         net, losses, ys_cached = load_cache(cache_path)
     else:
-        print(f"Training on mask = {{{idx_a}, {idx_b}}} out of {grid_shape} grid …\n")
+        print(
+            f"Training on mask = {{{idx_a}, {idx_b}}} out of {grid_shape} grid …\n")
         net, losses = train_net_masked(
             structure, functions,
             mask_indices=[idx_a, idx_b],
@@ -340,15 +345,16 @@ def main():
         structure, grid_shape, idx_a, idx_b, args.n_steps
     )
 
-    dev       = next(net.parameters()).device
-    x_tensor  = functions.x_tensor.to(dev)
-    x         = functions.x.reshape(-1)
+    dev = next(net.parameters()).device
+    x_tensor = functions.x_tensor.to(dev)
+    x = functions.x.reshape(-1)
 
     y_preds = []
     with torch.no_grad():
         for noise_vecs in noise_list:
             noise_on_dev = [v.to(dev) for v in noise_vecs]
-            out = net(x_tensor, noise_on_dev).detach().cpu().numpy().reshape(-1)
+            out = net(x_tensor, noise_on_dev).detach(
+            ).cpu().numpy().reshape(-1)
             y_preds.append(out)
 
     # ------------------------------------------------------------------
@@ -362,15 +368,15 @@ def main():
     # ------------------------------------------------------------------
     cmap_v = plt.get_cmap("viridis")
     t_values = np.linspace(0.0, 1.0, args.n_steps)
-    colors   = [cmap_v(v) for v in np.linspace(0.05, 0.95, args.n_steps)]
-    color_a  = colors[0]    # viridis color at t=0  (used for target A)
-    color_b  = colors[-1]   # viridis color at t=1  (used for target B)
+    colors = [cmap_v(v) for v in np.linspace(0.0, 0.8, args.n_steps)]
+    color_a = colors[0]    # viridis color at t=0  (used for target A)
+    color_b = colors[-1]   # viridis color at t=1  (used for target B)
 
     # Human-readable function formulas  e.g.  sin(1.22 x + 0.63)
     def fmt_sin(p):
-        freq  = p.get("freq", 1.0)
+        freq = p.get("freq", 1.0)
         phase = p["phase"]
-        sign  = "+" if phase >= 0 else "-"
+        sign = "+" if phase >= 0 else "-"
         return rf"$\sin({freq:.2f}\,x {sign} {abs(phase):.2f})$"
 
     label_a = fmt_sin(params_a)
@@ -399,11 +405,16 @@ def main():
     # ------------------------------------------------------------------
     # Figure 1b – masked_2d_regression_ex (only t=0 and t=1)
     # ------------------------------------------------------------------
-    fig_reg_ex, ax_reg_ex = plt.subplots(figsize=(9, 5), constrained_layout=True)
-    ax_reg_ex.plot(x, y_preds[0], color=color_a, linewidth=1.8, label="Result A", alpha=0.85)
-    ax_reg_ex.plot(x, y_true_a, "o", color=color_a, markersize=3, alpha=0.9, label="Target A")
-    ax_reg_ex.plot(x, y_preds[-1], color=color_b, linewidth=1.8, label="Result B", alpha=0.85)
-    ax_reg_ex.plot(x, y_true_b, "s", color=color_b, markersize=3, alpha=0.9, label="Target B")
+    fig_reg_ex, ax_reg_ex = plt.subplots(
+        figsize=(9, 5), constrained_layout=True)
+    ax_reg_ex.plot(x, y_preds[0], color=color_a,
+                   linewidth=1.8, label="Result A", alpha=0.85)
+    ax_reg_ex.plot(x, y_true_a, "o", color=color_a,
+                   markersize=3, alpha=0.9, label="Target A")
+    ax_reg_ex.plot(x, y_preds[-1], color=color_b,
+                   linewidth=1.8, label="Result B", alpha=0.85)
+    ax_reg_ex.plot(x, y_true_b, "s", color=color_b,
+                   markersize=3, alpha=0.9, label="Target B")
     ax_reg_ex.set_xlabel("$x$")
     ax_reg_ex.set_ylabel("$y$")
     ax_reg_ex.set_xlim(-2 * np.pi, 2 * np.pi)
@@ -413,7 +424,8 @@ def main():
     # ------------------------------------------------------------------
     # Figure 1c – maskex_2d_regression_mid
     # ------------------------------------------------------------------
-    fig_reg_mid, ax_reg_mid = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    fig_reg_mid, ax_reg_mid = plt.subplots(
+        figsize=(9, 5), constrained_layout=True)
     for t, color, y_pred in zip(t_values, colors, y_preds):
         if t == 0.0 or t == 1.0:
             ax_reg_mid.plot(x, y_pred, color=color, linewidth=1.8, linestyle=":",
@@ -431,7 +443,7 @@ def main():
     # Figure 2 (×n_steps) – noise fields styled like build_virtual_panel
     # ------------------------------------------------------------------
     noise_shape = tuple(args.noise_structure)   # (8, 8)
-    n_rows      = args.n_steps
+    n_rows = args.n_steps
 
     # Find global vmin/vmax for consistent colormap across panels
     all_fields = [
@@ -465,7 +477,7 @@ def main():
             frac = i / noise_shape[0]
             ax_n.axhline(frac, color="gray", linewidth=0.35, alpha=0.45)
         ax_n.set_title(f"$t={t:.2f}$", color=color, fontsize=9)
-        
+
         divider = make_axes_locatable(ax_n)
         cax = divider.append_axes("right", size="5%", pad=0.1)
         fig_n.colorbar(im_noise, cax=cax, label="Noise intensity")
@@ -478,7 +490,8 @@ def main():
     #   • viridis colors for interpolated centers
     #   • A / B labelled with actual sin formula
     # ------------------------------------------------------------------
-    fig_grid, ax_grid = plt.subplots(figsize=(5.5, 5.5), constrained_layout=True)
+    fig_grid, ax_grid = plt.subplots(
+        figsize=(5.5, 5.5), constrained_layout=True)
 
     # ---- 8×8 sampling centers in the physical neuron space mapped back
     #      to the virtual [0,1]^2 space, and then rescaled to "grid-coordinate"
@@ -492,11 +505,11 @@ def main():
     sc_j_phys = np.linspace(0, 1, noise_n1)
     sc_i = (sc_i_phys - a / 2) / (1 - a)
     sc_j = (sc_j_phys - a / 2) / (1 - a)
-    
+
     # Map to grid-index space (0..9)
     sc_i_grid = sc_i * (grid_shape[0] - 1)
     sc_j_grid = sc_j * (grid_shape[1] - 1)
-    scj, sci  = np.meshgrid(sc_j_grid, sc_i_grid)
+    scj, sci = np.meshgrid(sc_j_grid, sc_i_grid)
     ax_grid.scatter(scj.ravel(), sci.ravel(), s=18, color="#aaaaaa",
                     zorder=2, label="sampling centers", marker="s", alpha=0.7)
 
@@ -516,19 +529,19 @@ def main():
 
     # ---- intermediate interpolation points & activation circles
     for t, color in zip(t_values, colors):
-        frac      = (1 - t) * frac_a + t * frac_b
-        grid_pos  = frac * (np.array(grid_shape) - 1)
-        
+        frac = (1 - t) * frac_a + t * frac_b
+        grid_pos = frac * (np.array(grid_shape) - 1)
+
         # Activation region circle (extremes only)
         if t == 0.0 or t == 1.0:
             ellipse = plt.matplotlib.patches.Ellipse(
-                (grid_pos[1], grid_pos[0]), 
+                (grid_pos[1], grid_pos[0]),
                 width=2 * r_grid_j, height=2 * r_grid_i,
-                edgecolor=color, facecolor='none', linestyle='--', 
+                edgecolor=color, facecolor='none', linestyle='--',
                 linewidth=1.2, zorder=3, alpha=0.6
             )
             ax_grid.add_patch(ellipse)
-        
+
         # Intermediate points scatter (excluding t=0 and t=1)
         if 0 < t < 1:
             ax_grid.scatter(grid_pos[1], grid_pos[0], s=28,
@@ -547,9 +560,33 @@ def main():
     ax_grid.set_xticklabels(np.arange(1, grid_shape[1] + 1))
     ax_grid.set_yticks(np.arange(grid_shape[0]))
     ax_grid.set_yticklabels(np.arange(1, grid_shape[0] + 1))
+
     ax_grid.set_xlabel(r"$k_v^{(1)}$ (frequency index)")
     ax_grid.set_ylabel(r"$k_v^{(2)}$ (phase index)")
-    ax_grid.legend(loc="upper right", fontsize=7.5, framealpha=0.85)
+
+    # Create legend with slightly more vertical spacing
+    leg = ax_grid.legend(loc="upper right", fontsize=7.5,
+                         framealpha=0.85, labelspacing=1.2)
+
+    # Loop through legend handles and shrink the scatter dots down to a readable size
+    for handle in leg.legend_handles:
+        if hasattr(handle, 'set_sizes'):
+            handle.set_sizes([30])
+
+    ax_grid.grid(True, alpha=0.15)
+    ax_grid.set_aspect("equal")
+
+    ax_grid.set_xlabel(r"$k_v^{(1)}$ (frequency index)")
+    ax_grid.set_ylabel(r"$k_v^{(2)}$ (phase index)")
+#    ax_grid.legend(loc="upper right", fontsize=7.5, framealpha=0.85)
+    ax_grid.legend(
+        loc="upper right",
+        fontsize=7.5,
+        framealpha=0.85,
+        labelspacing=1.02,     # Increases the vertical space between the rows
+        handletextpad=1.2,    # Adds a little more space between the big dot and the text
+        borderpad=1.2         # Gives the whole legend box a bit more padding
+    )
     ax_grid.grid(True, alpha=0.15)
     ax_grid.set_aspect("equal")
 
@@ -572,18 +609,20 @@ def main():
     # ------------------------------------------------------------------
     # Save figures
     # ------------------------------------------------------------------
-    out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../fig"))
+    out_dir = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "../fig"))
     os.makedirs(out_dir, exist_ok=True)
 
     suffix = f"_A{'_'.join(str(i) for i in idx_a)}_B{'_'.join(str(i) for i in idx_b)}"
-    reg_path   = os.path.join(out_dir, f"masked_2d_interp{suffix}.pdf")
-    grid_path  = os.path.join(out_dir, f"masked_2d_grid{suffix}.pdf")
+    reg_path = os.path.join(out_dir, f"masked_2d_interp{suffix}.pdf")
+    grid_path = os.path.join(out_dir, f"masked_2d_grid{suffix}.pdf")
 
     fig_reg.savefig(reg_path,   bbox_inches="tight", pad_inches=0.02)
     fig_grid.savefig(grid_path,  bbox_inches="tight", pad_inches=0.02)
 
     reg_ex_path = os.path.join(out_dir, f"masked_2d_regression_ex{suffix}.pdf")
-    reg_mid_path = os.path.join(out_dir, f"maskex_2d_regression_mid{suffix}.pdf")
+    reg_mid_path = os.path.join(
+        out_dir, f"maskex_2d_regression_mid{suffix}.pdf")
     fig_reg_ex.savefig(reg_ex_path, bbox_inches="tight", pad_inches=0.02)
     fig_reg_mid.savefig(reg_mid_path, bbox_inches="tight", pad_inches=0.02)
 
@@ -597,24 +636,27 @@ def main():
         n_path = os.path.join(out_dir, f"masked_2d_noise_t{t_str}{suffix}.pdf")
         fig_n.savefig(n_path, bbox_inches="tight", pad_inches=0.02)
         print(f"Saved: {n_path}")
-        
+
         # Extra figure without title for extremes
         if t == 0.0 or t == 1.0:
             ax_n.set_title("")
-            n_ex_path = os.path.join(out_dir, f"masked_2d_noise_ex_t{t_str}{suffix}.pdf")
+            n_ex_path = os.path.join(
+                out_dir, f"masked_2d_noise_ex_t{t_str}{suffix}.pdf")
             fig_n.savefig(n_ex_path, bbox_inches="tight", pad_inches=0.02)
             print(f"Saved: {n_ex_path}")
 
     for fig_h, ax_h, t in figs_hidden:
         t_str = f"{t:.2f}".replace(".", "p")
-        h_path = os.path.join(out_dir, f"masked_2d_hidden_t{t_str}{suffix}.pdf")
+        h_path = os.path.join(
+            out_dir, f"masked_2d_hidden_t{t_str}{suffix}.pdf")
         fig_h.savefig(h_path, bbox_inches="tight", pad_inches=0.02)
         print(f"Saved: {h_path}")
-        
+
         # Extra figure without title for extremes
         if t == 0.0 or t == 1.0:
             ax_h.set_title("")
-            h_ex_path = os.path.join(out_dir, f"masked_2d_hidden_ex_t{t_str}{suffix}.pdf")
+            h_ex_path = os.path.join(
+                out_dir, f"masked_2d_hidden_ex_t{t_str}{suffix}.pdf")
             fig_h.savefig(h_ex_path, bbox_inches="tight", pad_inches=0.02)
             print(f"Saved: {h_ex_path}")
 

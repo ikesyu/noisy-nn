@@ -47,7 +47,7 @@ def multidim_fit_freq(dimbin, plot_shuffle):
     plt.grid(True)
     plt.legend()
     fs = [l for l, v in zip(["Phase", "Frequency", "Amplitude"], dimpatt) if v]
-    plt.title(f"Function space {fs}")
+    # plt.title(f"Function space {fs}")
     ps = "s" if plot_shuffle else "n"
     plt.savefig(f"../fig/multidim_fit_freq{dimbin}{ps}.pdf")
     plt.close()
