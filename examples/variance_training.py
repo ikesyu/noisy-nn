@@ -107,12 +107,8 @@ def train_one(mode: str, seed: int, epochs: int = 600) -> TrainResult:
     torch.manual_seed(seed)
     x, y_target, v_target = make_dataset(mode=mode)
 
-    model = NNNMeanVarianceRegressor(
-        structure=(1, 48, 48),
-        std=0.6,
-        h=0.15,
-        t=32,
-    )
+    model = NNNMeanVarianceRegressor(structure=(1, 48, 48), std=0.6, h=0.15, t=32)
+    #model = NNNRawSampleRegressor(structure=(1, 48, 48), std=0.6, h=0.15, t=32)
     optimizer = optim.Adam(model.parameters(), lr=3e-3, weight_decay=1e-5)
 
     losses = []
