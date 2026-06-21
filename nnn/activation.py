@@ -355,6 +355,97 @@ class CrossingAnalytic(torch.autograd.Function):
 
 
 # =========================================================
+# Compact-support, analytical, hardware-oriented activations
+# =========================================================
+class ParabolicCrossingAnalytic(torch.autograd.Function):
+    """Analytical crossing response for bounded uniform noise.
+
+    If eta ~ Uniform(center - radius, center + radius), the analytical-level
+    crossing activation is
+
+        y = 0.5 * [1 - ((x - center) / radius)^2]_+.
+
+    The radius plays the role of a recruitment/noise-strength parameter. When
+    radius is zero, both output and derivative are zero.
+    """
+
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, center=0.0, radius=1.0, epsilon: float = 1e-10) -> torch.Tensor:
+        c = torch.as_tensor(center, device=input.device, dtype=input.dtype)
+        r = torch.as_tensor(radius, device=input.device, dtype=input.dtype)
+        c, r = torch.broadcast_tensors(c, r)
+        r = torch.clamp(r, min=0.0)
+        r_safe = torch.clamp(r, min=epsilon)
+
+        u = (input - c) / r_safe
+        active = (torch.abs(u) < 1.0) & (r > epsilon)
+        output = 0.5 * (1.0 - u * u)
+        output = torch.where(active, output, torch.zeros_like(input))
+
+        ctx.save_for_backward(input, c, r, active)
+        ctx.epsilon = epsilon
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        input, c, r, active = ctx.saved_tensors
+        r_safe = torch.clamp(r, min=ctx.epsilon)
+        coeff = -(input - c) / (r_safe * r_safe)
+        coeff = torch.where(active, coeff, torch.zeros_like(input))
+        return coeff * grad_output, None, None, None
+
+
+class HatApproxCrossingAnalytic(torch.autograd.Function):
+    """Piecewise-linear hardware-oriented approximation of the parabolic response.
+
+    Normalized mode:
+        y = 0.5 * [1 - |x - center| / radius]_+.
+
+    Coupled mode:
+        y = [radius - |x - center|]_+.
+
+    The normalized mode matches the peak scale of the analytical crossing response.
+    The coupled mode is useful for hardware because the output also vanishes as the
+    recruitment radius goes to zero and no division is required.
+    """
+
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, center=0.0, radius=1.0, normalized: bool = True, epsilon: float = 1e-10) -> torch.Tensor:
+        c = torch.as_tensor(center, device=input.device, dtype=input.dtype)
+        r = torch.as_tensor(radius, device=input.device, dtype=input.dtype)
+        c, r = torch.broadcast_tensors(c, r)
+        r = torch.clamp(r, min=0.0)
+        r_safe = torch.clamp(r, min=epsilon)
+
+        diff = input - c
+        abs_diff = torch.abs(diff)
+        active = (abs_diff < r) & (r > epsilon)
+
+        if normalized:
+            output = 0.5 * (1.0 - abs_diff / r_safe)
+        else:
+            output = r - abs_diff
+        output = torch.where(active, output, torch.zeros_like(input))
+
+        ctx.save_for_backward(diff, r, active)
+        ctx.normalized = normalized
+        ctx.epsilon = epsilon
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        diff, r, active = ctx.saved_tensors
+        sign = torch.sign(diff)
+        if ctx.normalized:
+            r_safe = torch.clamp(r, min=ctx.epsilon)
+            coeff = -0.5 * sign / r_safe
+        else:
+            coeff = -sign
+        coeff = torch.where(active, coeff, torch.zeros_like(diff))
+        return coeff * grad_output, None, None, None, None
+
+
+# =========================================================
 # Simple check
 # Run `python -m nnn.activation` from outside the nnn directory.
 #

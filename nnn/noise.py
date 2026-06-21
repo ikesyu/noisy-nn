@@ -464,6 +464,71 @@ def interpolate_stdvecs(stdvec1: torch.Tensor, stdvec2: torch.Tensor, rate: floa
 
 
 # =========================================================
+# Compact-support noise utilities for parabolic/hat NNN
+# =========================================================
+def uniform_noise_like(center: torch.Tensor, radius: torch.Tensor, epsilon: float = 1e-10) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Creates a sampler for bounded uniform noise.
+
+    This noise family gives the exact parabolic analytical crossing response:
+
+        E[z] = 0.5 * [1 - ((d - center) / radius)^2]_+.
+
+    Args:
+        center: Center of the uniform distribution. Broadcastable to input shape.
+        radius: Half-width of the uniform distribution. Broadcastable to input shape.
+        epsilon: If radius is not larger than epsilon, deterministic zero noise is used.
+
+    Returns:
+        A function that generates noise tensors with the same shape as its input.
+    """
+    def gen(input: torch.Tensor) -> torch.Tensor:
+        c = torch.as_tensor(center, device=input.device, dtype=input.dtype)
+        r = torch.as_tensor(radius, device=input.device, dtype=input.dtype)
+        c, r = torch.broadcast_tensors(c, r)
+        r_safe = torch.clamp(r, min=0.0)
+        u = torch.rand_like(input) * 2.0 - 1.0
+        sampled = c + r_safe * u
+        return torch.where(r_safe > epsilon, sampled, torch.zeros_like(input))
+    return gen
+
+
+def uniform_pdf_torch(center: float, radius: Union[float, torch.Tensor], epsilon: float = 1e-10) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Returns the PDF of Uniform(center - radius, center + radius)."""
+    def pdf(x: torch.Tensor) -> torch.Tensor:
+        c = torch.as_tensor(center, device=x.device, dtype=x.dtype)
+        r = torch.as_tensor(radius, device=x.device, dtype=x.dtype)
+        r = torch.clamp(r, min=0.0)
+        inside = (torch.abs(x - c) < r) & (r > epsilon)
+        val = 1.0 / (2.0 * torch.clamp(r, min=epsilon))
+        return torch.where(inside, val, torch.zeros_like(x))
+    return pdf
+
+
+def uniform_cdf_torch(center: float, radius: Union[float, torch.Tensor], epsilon: float = 1e-10) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Returns the CDF of Uniform(center - radius, center + radius)."""
+    def cdf(x: torch.Tensor) -> torch.Tensor:
+        c = torch.as_tensor(center, device=x.device, dtype=x.dtype)
+        r = torch.as_tensor(radius, device=x.device, dtype=x.dtype)
+        r_safe = torch.clamp(r, min=epsilon)
+        raw = (x - c + r_safe) / (2.0 * r_safe)
+        out = torch.clamp(raw, 0.0, 1.0)
+        return torch.where(r > epsilon, out, torch.zeros_like(x))
+    return cdf
+
+
+def recruitment_to_radius(recruitment: Union[float, torch.Tensor], max_radius: float = 1.0, min_radius: float = 0.0) -> Union[float, torch.Tensor]:
+    """Maps a recruitment/noise-field intensity value to an activation radius.
+
+    The recruitment value is intended to represent how strongly a unit is recruited
+    by the noise field. A value of 0 means that the unit is inactive; larger values
+    expand the local active region.
+    """
+    if torch.is_tensor(recruitment):
+        return min_radius + (max_radius - min_radius) * torch.clamp(recruitment, 0.0, 1.0)
+    return min_radius + (max_radius - min_radius) * max(0.0, min(1.0, float(recruitment)))
+
+
+# =========================================================
 # Simple check
 # Run `python -m nnn.noise` from outside the nnn directory.
 # =========================================================

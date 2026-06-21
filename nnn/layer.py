@@ -262,6 +262,67 @@ class GaussianCrossingAnalyticLayer(nn.Module):
         return activation.CrossingAnalytic.apply(x, pdf, cdf)
         
 
+# =========================================================
+# Compact-support, analytical, hardware-oriented layers
+# =========================================================
+class ParabolicCrossingAnalyticLayer(nn.Module):
+    """Analytical crossing layer for bounded uniform noise.
+
+    The forward response is
+        0.5 * [1 - ((x - center) / radius)^2]_+.
+
+    The `recruitment` argument is a transparent noise-field intensity in [0, 1].
+    It is mapped to `radius = max_radius * recruitment`. Thus recruitment=0 makes
+    the unit completely inactive, matching the role of zero noise in the original NNN.
+    """
+
+    def __init__(self, recruitment=1.0, center=0.0, max_radius=1.0, epsilon=1e-10):
+        super(ParabolicCrossingAnalyticLayer, self).__init__()
+        self.recruitment = recruitment
+        self.center = center
+        self.max_radius = max_radius
+        self.epsilon = epsilon
+
+    def forward(self, x: torch.Tensor, recruitment=None, radius=None, center=None) -> torch.Tensor:
+        if recruitment is not None:
+            self.recruitment = recruitment
+        if center is not None:
+            self.center = center
+        if radius is None:
+            radius = noise.recruitment_to_radius(self.recruitment, self.max_radius)
+        return activation.ParabolicCrossingAnalytic.apply(x, self.center, radius, self.epsilon)
+
+
+class HatApproxCrossingAnalyticLayer(nn.Module):
+    """Hardware-oriented hat approximation layer.
+
+    Normalized mode:
+        0.5 * [1 - |x - center| / radius]_+.
+
+    Coupled mode:
+        [radius - |x - center|]_+.
+
+    The `recruitment` argument is mapped to `radius = max_radius * recruitment`.
+    This makes the same noise-field vector usable as a neuron-recruitment vector.
+    """
+
+    def __init__(self, recruitment=1.0, center=0.0, max_radius=1.0, normalized=True, epsilon=1e-10):
+        super(HatApproxCrossingAnalyticLayer, self).__init__()
+        self.recruitment = recruitment
+        self.center = center
+        self.max_radius = max_radius
+        self.normalized = normalized
+        self.epsilon = epsilon
+
+    def forward(self, x: torch.Tensor, recruitment=None, radius=None, center=None) -> torch.Tensor:
+        if recruitment is not None:
+            self.recruitment = recruitment
+        if center is not None:
+            self.center = center
+        if radius is None:
+            radius = noise.recruitment_to_radius(self.recruitment, self.max_radius)
+        return activation.HatApproxCrossingAnalytic.apply(x, self.center, radius, self.normalized, self.epsilon)
+
 
 # =========================================================
 # Simple check

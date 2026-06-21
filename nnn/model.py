@@ -303,6 +303,147 @@ class SimpleNNNAnalytic(nn.Module):
 
 
 # =========================================================
+# Compact-support NNN variants
+# =========================================================
+class SimpleNNNParabolicAnalytic(nn.Module):
+    """Simple NNN using the parabolic analytical crossing response.
+
+    This model extends SimpleNNNAnalytic by replacing the Gaussian analytical
+    response with the exact analytical response induced by bounded uniform noise:
+
+        z = 0.5 * [1 - ((d - c) / r)^2]_+.
+
+    The `recruitment`/`recruitments` argument plays the same conceptual role as
+    the noise-strength field in the original NNN: recruitment=0 detaches the unit,
+    and larger values expand the active region.
+    """
+
+    def __init__(self, structure=[1, 25, 25, 1], recruitment=1.0, center=0.0,
+                 max_radius=1.0, output_bias=False):
+        if len(structure) < 3:
+            raise ValueError("The structure list must have at least 3 elements.")
+
+        super(SimpleNNNParabolicAnalytic, self).__init__()
+        self.fcs = nn.ModuleList()
+        self.activations = nn.ModuleList()
+        self.structure = structure
+        self.recruitment = recruitment
+        self.center = center
+        self.max_radius = max_radius
+        self.output_bias = output_bias
+
+        for index, (pre, post) in enumerate(zip(self.structure, self.structure[1:])):
+            self.fcs.append(nn.Linear(pre, post, bias=(self.output_bias if index == len(self.structure)-2 else True)))
+
+        for _ in range(len(self.structure) - 2):
+            self.activations.append(layer.ParabolicCrossingAnalyticLayer(
+                recruitment=self.recruitment,
+                center=self.center,
+                max_radius=self.max_radius,
+            ))
+
+    def forward(self, x: torch.Tensor, recruitments: list = None, stds: list = None,
+                radii: list = None, centers: list = None) -> torch.Tensor:
+        """Computes the forward pass.
+
+        Args:
+            x: Input tensor of shape [N, D].
+            recruitments: Optional list of recruitment/noise-field tensors, one per hidden layer.
+            stds: Alias of recruitments for compatibility with existing NNN scripts.
+            radii: Optional list of explicit radii. If given, it overrides recruitment.
+            centers: Optional list of center values/tensors, one per hidden layer.
+        """
+        if recruitments is None and stds is not None:
+            recruitments = stds
+        n_hidden = len(self.structure) - 2
+        if recruitments is not None and len(recruitments) != n_hidden:
+            raise ValueError("The length of `recruitments` must match len(structure)-2.")
+        if radii is not None and len(radii) != n_hidden:
+            raise ValueError("The length of `radii` must match len(structure)-2.")
+        if centers is not None and len(centers) != n_hidden:
+            raise ValueError("The length of `centers` must match len(structure)-2.")
+
+        for i in range(len(self.structure) - 1):
+            x = self.fcs[i](x)
+            if i < n_hidden:
+                rec = recruitments[i] if recruitments is not None else self.recruitment
+                rad = radii[i] if radii is not None else None
+                cen = centers[i] if centers is not None else self.center
+                x = self.activations[i](x, recruitment=rec, radius=rad, center=cen)
+        return x
+
+
+class SimpleNNNHatApproxAnalytic(nn.Module):
+    """Simple NNN using a hat-shaped hardware-oriented approximation.
+
+    Normalized mode:
+        z = 0.5 * [1 - |d - c| / r]_+.
+
+    Coupled mode:
+        z = [r - |d - c|]_+.
+
+    The `recruitment`/`recruitments` argument is mapped to radius and therefore
+    behaves as a neuron-recruitment/noise-field intensity parameter.
+    """
+
+    def __init__(self, structure=[1, 25, 25, 1], recruitment=1.0, center=0.0,
+                 max_radius=1.0, normalized=True, output_bias=False):
+        if len(structure) < 3:
+            raise ValueError("The structure list must have at least 3 elements.")
+
+        super(SimpleNNNHatApproxAnalytic, self).__init__()
+        self.fcs = nn.ModuleList()
+        self.activations = nn.ModuleList()
+        self.structure = structure
+        self.recruitment = recruitment
+        self.center = center
+        self.max_radius = max_radius
+        self.normalized = normalized
+        self.output_bias = output_bias
+
+        for index, (pre, post) in enumerate(zip(self.structure, self.structure[1:])):
+            self.fcs.append(nn.Linear(pre, post, bias=(self.output_bias if index == len(self.structure)-2 else True)))
+
+        for _ in range(len(self.structure) - 2):
+            self.activations.append(layer.HatApproxCrossingAnalyticLayer(
+                recruitment=self.recruitment,
+                center=self.center,
+                max_radius=self.max_radius,
+                normalized=self.normalized,
+            ))
+
+    def forward(self, x: torch.Tensor, recruitments: list = None, stds: list = None,
+                radii: list = None, centers: list = None) -> torch.Tensor:
+        """Computes the forward pass.
+
+        Args:
+            x: Input tensor of shape [N, D].
+            recruitments: Optional list of recruitment/noise-field tensors, one per hidden layer.
+            stds: Alias of recruitments for compatibility with existing NNN scripts.
+            radii: Optional list of explicit radii. If given, it overrides recruitment.
+            centers: Optional list of center values/tensors, one per hidden layer.
+        """
+        if recruitments is None and stds is not None:
+            recruitments = stds
+        n_hidden = len(self.structure) - 2
+        if recruitments is not None and len(recruitments) != n_hidden:
+            raise ValueError("The length of `recruitments` must match len(structure)-2.")
+        if radii is not None and len(radii) != n_hidden:
+            raise ValueError("The length of `radii` must match len(structure)-2.")
+        if centers is not None and len(centers) != n_hidden:
+            raise ValueError("The length of `centers` must match len(structure)-2.")
+
+        for i in range(len(self.structure) - 1):
+            x = self.fcs[i](x)
+            if i < n_hidden:
+                rec = recruitments[i] if recruitments is not None else self.recruitment
+                rad = radii[i] if radii is not None else None
+                cen = centers[i] if centers is not None else self.center
+                x = self.activations[i](x, recruitment=rec, radius=rad, center=cen)
+        return x
+
+
+# =========================================================
 # Simple check
 # Run `python -m nnn.model` from outside the nnn directory.
 # =========================================================
@@ -324,6 +465,8 @@ if __name__ == "__main__":
     #net = SimpleNNNSample()
     #net = SimpleNNNStatistic()
     #net = SimpleNNNAnalytic()
+    #net = SimpleNNNParabolicAnalytic()
+    #net = SimpleNNNHatApproxAnalytic()
 
     # Loss and Optimization
     criterion = nn.MSELoss()
