@@ -443,6 +443,77 @@ class SimpleNNNHatApproxAnalytic(nn.Module):
         return x
 
 
+class SimpleNNNUniformSample(nn.Module):
+    """A simple neural network using sample-based computations with bounded uniform noise.
+
+    This network is the Monte-Carlo counterpart of SimpleNNNParabolicAnalytic.
+    At each hidden layer, bounded uniform noise Uniform(center - radius, center + radius)
+    is injected and the Crossing activation (sample version) is applied.  Outputs are
+    averaged over T samples at the end.
+
+    The expected activation per hidden unit matches the exact parabolic response:
+
+        E[z] = 0.5 * [1 - ((d - center) / radius)^2]_+
+
+    Args:
+        structure (list): List of layer sizes, where len(structure) >= 3.
+            Defaults to [1, 25, 25, 1].
+        radius (float): Half-width of the uniform noise distribution. Defaults to 1.0.
+        center (float): Center of the uniform noise distribution. Defaults to 0.0.
+        h (float): Threshold parameter for the Crossing activation function. Defaults to 0.1.
+        t (int): Number of Monte-Carlo samples per input. Defaults to 64.
+        output_bias (bool): Whether the output layer has a bias term. Defaults to False.
+
+    Raises:
+        ValueError: If structure has fewer than 3 elements.
+    """
+
+    def __init__(self, structure=[1, 25, 25, 1], radius=1.0, center=0.0,
+                 h=0.1, t=64, output_bias=False):
+        if len(structure) < 3:
+            raise ValueError("The structure list must have at least 3 elements.")
+        super(SimpleNNNUniformSample, self).__init__()
+        self.structure = structure
+        self.radius = radius
+        self.center = center
+        self.h = h
+        self.t = t
+        self.output_bias = output_bias
+        n_hidden = len(structure) - 2
+
+        self.fcs = nn.ModuleList([
+            nn.Linear(pre, post,
+                      bias=(output_bias if idx == len(structure) - 2 else True))
+            for idx, (pre, post) in enumerate(zip(structure, structure[1:]))
+        ])
+        self.uniform_crossing = nn.ModuleList([
+            layer.UniformCrossingSampleLayer(radius=radius, center=center, h=h)
+            for _ in range(n_hidden)
+        ])
+        self.sampled_layer = layer.SampleLayer(numT=t)
+        self.ensemble_layer = layer.EnsembleMeanLayer()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Computes the forward pass of the network.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [N, D].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [N, D].
+        """
+        n_hidden = len(self.structure) - 2
+        for i in range(len(self.structure) - 1):
+            x = self.fcs[i](x)
+            if i == 0:
+                x = self.sampled_layer(x)
+            if i < n_hidden:
+                x = self.uniform_crossing[i](x)
+            if i == n_hidden:
+                x = self.ensemble_layer(x)
+        return x
+
+
 # =========================================================
 # Simple check
 # Run `python -m nnn.model` from outside the nnn directory.

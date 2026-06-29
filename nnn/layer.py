@@ -324,6 +324,44 @@ class HatApproxCrossingAnalyticLayer(nn.Module):
         return activation.HatApproxCrossingAnalytic.apply(x, self.center, radius, self.normalized, self.epsilon)
 
 
+class UniformCrossingSampleLayer(nn.Module):
+    """Applies the Crossing activation function (sampling version) with bounded uniform noise.
+
+    Noise is drawn from Uniform(center - radius, center + radius).  Taking the
+    expectation over samples recovers the exact parabolic analytical response:
+
+        E[z] = 0.5 * [1 - ((x - center) / radius)^2]_+
+
+    so this layer is the Monte-Carlo counterpart of ParabolicCrossingAnalyticLayer.
+    Operates on tensors of shape [N, T, D].
+
+    Args:
+        radius (float): Half-width of the uniform noise distribution. Defaults to 1.0.
+        center (float): Center of the uniform noise distribution. Defaults to 0.0.
+        h (float): Threshold parameter for the Crossing activation function. Defaults to 0.1.
+    """
+
+    def __init__(self, radius: float = 1.0, center: float = 0.0, h: float = 0.1):
+        super(UniformCrossingSampleLayer, self).__init__()
+        self.radius = radius
+        self.center = center
+        self.h = h
+
+    def forward(self, x: torch.Tensor, radius: float = None) -> torch.Tensor:
+        """Applies bounded uniform noise and the Crossing activation function.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [N, T, D].
+            radius (float, optional): Override the noise half-width for this call.
+
+        Returns:
+            torch.Tensor: Output tensor of the same shape.
+        """
+        r = radius if radius is not None else self.radius
+        noise_gen = noise.uniform_noise_like(center=self.center, radius=r)
+        return activation.CrossingSample.apply(x + noise_gen(x), self.h)
+
+
 # =========================================================
 # Simple check
 # Run `python -m nnn.layer` from outside the nnn directory.
