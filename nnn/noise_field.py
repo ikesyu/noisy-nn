@@ -26,8 +26,7 @@ def gaussian_fill(shape, center, sigma, amplitude=1.0, normalize=False):
     """
     D = len(shape)
     out = torch.empty(*shape, dtype=torch.float32)
-    assert len(center) == D, f"center must have one entry per dimension {
-        shape=} {center=}"
+    assert len(center) == D, f"center must have one entry per dimension {shape=} {center=}"
 
     device, dtype = out.device, out.dtype
 
