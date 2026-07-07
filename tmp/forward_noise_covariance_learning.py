@@ -64,6 +64,26 @@ Methods compared
                    backprop.  BEATS cov_deriv at full budget (lowers the estimator-bias floor
                    ~30%), at the cost of slower convergence.  Correlate with the CONTINUOUS
                    pre-activation d, never the binary z.
+  cov_jac_full   : proposed -- cov_jac with the READOUT error ALSO taken from covariance.
+                   cov_jac (like every other method here) still seeds the recursion and
+                   updates the readout weights with the ANALYTIC loss derivative
+                   dL/dy = 2 (y - t).  cov_jac_full replaces it with the same forward-noise
+                   estimator used everywhere else:
+                       g_y[n] = Cov_t(L_n, y_n) / Var_t(y_n)  ~=  dL_n/dy_n
+                   over the readout's own per-sample fluctuation y_n,t (pre-ensemble).
+                   Same recursion, mirrors, and updates otherwise -- no analytic derivative
+                   of the loss is needed ANYWHERE; the network only ever sees the scalar
+                   per-sample loss.  CAVEAT (measured): because L = (y - t)^2 is quadratic
+                   in y, the raw regression coefficient is 2 (E[y] - t) + E[eps^3]/Var(eps);
+                   the skewness term of the crossing-induced readout fluctuation is a bias
+                   that does NOT vanish at convergence (corr 0.997 with the observed bias)
+                   and that Adam, which normalises gradient scale, amplifies late in
+                   training.  --jac-out selects the fix: 'cov_m3' (DEFAULT) subtracts the
+                   observed third central moment of y (still pure forward statistics; exact
+                   for quadratic loss; matches backprop: final MSE 0.00070 vs 0.00069),
+                   'probe' regresses the loss on an injected symmetric Gaussian probe
+                   (unbiased for ANY loss; 0.00129), 'cov' keeps the raw estimator (drifts
+                   to 0.029 with Adam; convergence SPEED still matches cov_jac).
   cov_deriv_gate_crn : proposed -- ANTITHETIC / COMMON-RANDOM-NUMBER gate.  Same block
                    gating, but each pass runs a paired (+xi, -xi) forward under the SAME
                    crossing noise (RNG-state reset), so the intrinsic-noise nuisance cancels
@@ -486,7 +506,8 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
               credit_passes: int = 1, opt: str = "sgd", lr_decay: str = "none",
               log_every: int = 0, slope: str = "kde", gate_block_size: int = 8,
               gate_alpha: float = 0.05, gate_mode: str = "cyclic", jac_ema: float = 0.9,
-              jac_track: bool = False):
+              jac_track: bool = False, jac_out: str = "cov",
+              out_probe_alpha: float = 0.2):
     """Manual covariance learning on a library Sample/UniformSample model.
 
     Hidden layers: covariance credit (x local slope) from captured per-sample
@@ -518,12 +539,15 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
     forward-only, weight-transport-free reconstruction of true backprop.  Slope from KDE.
     """
     assert method in ("cov_only", "cov_deriv", "cov_deriv_gate", "cov_deriv_kde",
-                      "cov_deriv_gate_crn", "cov_jac", "cov_deriv_field_gate")
+                      "cov_deriv_gate_crn", "cov_jac", "cov_jac_full",
+                      "cov_deriv_field_gate")
     assert credit in ("pooled", "per_input")
     assert slope in ("kde", "analytic")
+    assert jac_out in ("cov", "cov_m3", "probe")
     gate = method == "cov_deriv_gate"
     crn = method == "cov_deriv_gate_crn"
-    jac = method == "cov_jac"
+    jac = method in ("cov_jac", "cov_jac_full")
+    jac_full = method == "cov_jac_full"
     field_gate = method == "cov_deriv_field_gate"
     W_ema = {}                                      # cov_jac: running weight mirrors
     cap = Capture(net)
@@ -594,6 +618,7 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
 
             # --- cov_jac: weight mirrors (EMA) + recursive credit from the output error ---
             a_jac = None
+            g_y = None
             if jac:
                 slope_full = [kde_slope(cap.crossings[l], d[l]) for l in range(n_hidden)]
                 slope_mean = [s.mean(dim=1) for s in slope_full]        # [N, H] each
@@ -607,8 +632,38 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
                     for k, v in meas.items():
                         W_ema[k] = jac_ema * W_ema[k] + (1.0 - jac_ema) * v
                 # recursion top-down: a[l] = dL/dz[l] (per input) [N, H]
+                if jac_full:
+                    # cov_jac_full: the readout error itself from forward-noise statistics.
+                    # No analytic dL/dy anywhere.  Three estimators (jac_out):
+                    #   "cov"    : g_y = Cov_t(L, y)/Var_t(y).  For quadratic L this equals
+                    #              2 (E[y] - t) PLUS a skewness term E[eps^3]/Var(eps) of the
+                    #              crossing-induced readout fluctuation -- a bias that does
+                    #              NOT vanish at convergence (Adam amplifies it late).
+                    #   "cov_m3" : subtract the OBSERVED third central moment of y from the
+                    #              covariance -- exact bias removal for quadratic loss, still
+                    #              only forward statistics of (L, y).
+                    #   "probe"  : add a known symmetric Gaussian probe xi to the readout
+                    #              samples and regress the PROBED loss on xi:
+                    #              g_y = Cov_t(L(y+xi), xi)/Var_t(xi).  E[xi^3] = 0, so this
+                    #              is unbiased for any smooth loss (no skew term at all).
+                    ys_f = ys.squeeze(-1)                              # [N, KT]
+                    if jac_out == "probe":
+                        xi_out = out_probe_alpha * torch.randn_like(ys_f)
+                        L_pr = (ys_f + xi_out - t_target) ** 2
+                        cxi = xi_out - xi_out.mean(dim=1, keepdim=True)
+                        cLp = L_pr - L_pr.mean(dim=1, keepdim=True)
+                        g_y = ((cLp * cxi).mean(dim=1)
+                               / ((cxi ** 2).mean(dim=1) + EPS)).unsqueeze(1)   # [N, 1]
+                    else:
+                        cy = ys_f - ys_f.mean(dim=1, keepdim=True)
+                        cL = L - L.mean(dim=1, keepdim=True)
+                        cov_Ly = (cL * cy).mean(dim=1)                 # [N]
+                        if jac_out == "cov_m3":
+                            cov_Ly = cov_Ly - (cy ** 3).mean(dim=1)    # skew correction
+                        g_y = (cov_Ly / ((cy ** 2).mean(dim=1) + EPS)).unsqueeze(1)
                 a_jac = [None] * n_hidden
-                a_jac[-1] = (2.0 * (y - t_target)) * W_ema["out"]       # [N,1]*[1,H] -> [N,H]
+                err_out = g_y if jac_full else 2.0 * (y - t_target)     # [N, 1] ~ dL/dy
+                a_jac[-1] = err_out * W_ema["out"]                      # [N,1]*[1,H] -> [N,H]
                 for l in range(n_hidden - 2, -1, -1):
                     dd_next = a_jac[l + 1] * slope_mean[l + 1]          # dL/dd[l+1]  [N, H]
                     a_jac[l] = dd_next @ W_ema[l + 1]                   # [N, H_l]
@@ -668,7 +723,9 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
 
             # --- readout on the EXPECTED (ensemble-mean) features ---
             z_bar = z[-1].mean(dim=1)                            # [N, H]  ~ phi_bar
-            dL_dy = 2.0 * (y - t_target)                         # [N, 1]
+            # cov_jac_full: covariance-estimated readout error instead of the analytic
+            # loss derivative (g_y computed above from Cov_t(L, y)/Var_t(y)).
+            dL_dy = g_y if jac_full else 2.0 * (y - t_target)    # [N, 1]
             gWout = torch.einsum("no,ni->oi", dL_dy, z_bar) / N  # [1, H]
             gbout = dL_dy.mean(dim=0)                            # [1]
 
@@ -752,6 +809,7 @@ def plot_predictions(x_raw, target, preds: dict):
               "cov_deriv_kde": "-", "cov_deriv_analytic": (0, (3, 1, 1, 1)),
               "cov_jac": (0, (1, 1)), "cov_jac_sgd": (0, (1, 1)),
               "cov_jac_adam": (0, (4, 1, 1, 1)),
+              "cov_jac_full_sgd": (0, (2, 2)), "cov_jac_full_adam": (0, (6, 1, 1, 1)),
               "cov_deriv_gate": ":", "cov_deriv_gate_crn": (0, (5, 1)),
               "cov_deriv_field_gate": (0, (3, 1, 1, 1, 1, 1))}
     for name, y in preds.items():
@@ -783,14 +841,15 @@ def plot_activity_stats(stats_layer: dict):
     return fig
 
 
-def plot_fit_check(x_raw, target, preds: dict, focus=("backprop", "cov_jac_adam")):
+def plot_fit_check(x_raw, target, preds: dict,
+                   focus=("backprop", "cov_jac_adam", "cov_jac_full_adam")):
     """Focused confirmation figure: does cov_jac_adam approximate sin(x) as TIGHTLY as
     backprop?  Overlays only the target and the `focus` methods, plus a residual panel and
     the MSE in the legend, so the fit quality is unmistakable (rather than buried in the
     all-methods plot)."""
     order = np.argsort(x_raw)
     colors = {"backprop": "tab:blue", "cov_jac_adam": "tab:red",
-              "cov_jac_sgd": "tab:green"}
+              "cov_jac_sgd": "tab:green", "cov_jac_full_adam": "tab:purple"}
     fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
                              gridspec_kw={"height_ratios": [3, 1]})
     axes[0].plot(x_raw[order], target[order], "k-", lw=3.0, alpha=0.35, label="target sin(x)")
@@ -865,6 +924,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--jac-ema", type=float, default=0.9,
                    help="cov_jac: EMA rate for the running weight mirrors "
                         "W_hat = Cov(d_next,z)/Var(z) (higher = smoother/lower-variance) [0.9]")
+    p.add_argument("--jac-out", choices=("cov", "cov_m3", "probe"), default="cov_m3",
+                   help="cov_jac_full readout-error estimator: 'cov' = raw Cov(L,y)/Var(y) "
+                        "(carries an E[eps^3]/Var skew bias that Adam amplifies late); "
+                        "'cov_m3' = subtract the observed third moment (exact for quadratic "
+                        "loss; matches backprop) [DEFAULT]; 'probe' = Cov(L(y+xi), xi)/Var(xi) "
+                        "with an injected symmetric Gaussian probe xi (unbiased for any loss)")
+    p.add_argument("--out-probe-alpha", type=float, default=0.2,
+                   help="cov_jac_full --jac-out probe: std of the injected readout probe [0.2]")
     p.add_argument("--jac-track", action=argparse.BooleanOptionalAction, default=True,
                    help="cov_jac: Kolen-Pollack weight-mirror TRACKING (DEFAULT ON) -- "
                         "integrate the known applied weight update into the mirrors (predict) "
@@ -973,6 +1040,16 @@ def main() -> None:
     run("cov_jac_adam", "cov_jac", opt="adam", jac_ema=args.jac_ema, jac_track=args.jac_track,
         _desc="weight-mirror recursive credit, ADAM -- expected to match backprop "
               "(--jac-track=%s)" % args.jac_track)
+    run("cov_jac_full_sgd", "cov_jac_full", opt="sgd", jac_ema=args.jac_ema,
+        jac_track=args.jac_track, jac_out=args.jac_out,
+        out_probe_alpha=args.out_probe_alpha,
+        _desc="cov_jac + covariance readout error (jac_out=%s), SGD "
+              "(--jac-track=%s)" % (args.jac_out, args.jac_track))
+    run("cov_jac_full_adam", "cov_jac_full", opt="adam", jac_ema=args.jac_ema,
+        jac_track=args.jac_track, jac_out=args.jac_out,
+        out_probe_alpha=args.out_probe_alpha,
+        _desc="cov_jac + covariance readout error (jac_out=%s), ADAM -- no analytic "
+              "dL/dy anywhere (--jac-track=%s)" % (args.jac_out, args.jac_track))
 
     if args.include_gates:
         run("cov_deriv_gate", "cov_deriv_gate", gate_block_size=args.gate_block_size,
@@ -994,8 +1071,9 @@ def main() -> None:
     fin = {k: float(np.mean((v - target_np) ** 2)) for k, v in preds.items()}
     deriv_matches = abs(fin["cov_deriv_kde"] - fin["cov_deriv_analytic"]) <= 0.01
     jac_adam_near_bp = fin["cov_jac_adam"] <= max(2.0 * fin["backprop"], fin["backprop"] + 0.003)
+    jac_full_matches = abs(fin["cov_jac_full_adam"] - fin["cov_jac_adam"]) <= 0.003
     order = ["backprop", "cov_only", "cov_deriv_analytic", "cov_deriv_kde",
-             "cov_jac_sgd", "cov_jac_adam"]
+             "cov_jac_sgd", "cov_jac_adam", "cov_jac_full_sgd", "cov_jac_full_adam"]
     if args.include_gates:
         order += ["cov_deriv_gate", "cov_deriv_gate_crn", "cov_deriv_field_gate"]
     print("\n================ SUMMARY ================")
@@ -1018,6 +1096,12 @@ def main() -> None:
     print(f"  - cov_jac_adam {'beats' if fin['cov_jac_adam'] < fin['cov_jac_sgd'] else 'trails'} "
           f"cov_jac_sgd (delta MSE = {fin['cov_jac_sgd'] - fin['cov_jac_adam']:+.5f}) "
           f"-> the sgd 'floor' is optimisation, not estimator bias.")
+    print("  - cov_jac_full_{sgd,adam} = cov_jac with the READOUT error ALSO from forward")
+    print(f"    statistics (jac_out={args.jac_out}) ~ dL/dy -> NO analytic loss derivative "
+          "anywhere.")
+    print(f"  - cov_jac_full_adam {'MATCHES' if jac_full_matches else 'does NOT match'} "
+          f"cov_jac_adam (delta MSE = {fin['cov_jac_full_adam'] - fin['cov_jac_adam']:+.5f}) "
+          f"-> the analytic dL/dy at the readout is not needed.")
     print("  - Adam is a LOCAL per-weight rule -> keeps the no-weight-transport / "
           "FPGA-friendly property.")
     print("=========================================")

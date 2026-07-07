@@ -105,7 +105,10 @@ def model_factory(noise: str, args: argparse.Namespace, device: torch.device,
 # ============================================================
 # 実験行列
 # ============================================================
-# 検証セット (論文 §5.1): 6 手法。cov_jac 系は --jac-track 相当 ON。
+# 検証セット (論文 §5.1): 8 手法。cov_jac 系は --jac-track 相当 ON。
+# cov_jac_full は読み出し誤差も共分散から推定する変種 (§4.6/§5.7);
+# 既定の jac_out="cov_m3" は歪度バイアスの 3 次モーメント補正 (raw の "cov" は
+# Adam でドリフトする — その掃引は fncl5_7.py が担当)。
 VERIFICATION_METHODS = [
     ("backprop",           {"kind": "backprop"}),
     ("cov_only",           {"method": "cov_only"}),
@@ -113,6 +116,10 @@ VERIFICATION_METHODS = [
     ("cov_deriv_kde",      {"method": "cov_deriv", "slope": "kde"}),
     ("cov_jac_sgd",        {"method": "cov_jac", "opt": "sgd",  "jac_track": True}),
     ("cov_jac_adam",       {"method": "cov_jac", "opt": "adam", "jac_track": True}),
+    ("cov_jac_full_sgd",   {"method": "cov_jac_full", "opt": "sgd",
+                            "jac_track": True, "jac_out": "cov_m3"}),
+    ("cov_jac_full_adam",  {"method": "cov_jac_full", "opt": "adam",
+                            "jac_track": True, "jac_out": "cov_m3"}),
 ]
 
 
@@ -240,7 +247,7 @@ def norm_ratio(a: torch.Tensor, b: torch.Tensor) -> float:
 # 検証セット一式 (fncl5_2 / fncl5_5 が使用)
 # ============================================================
 def run_verification(noise: str, args) -> dict:
-    """検証 6 手法を複数 seed で走らせ、Tab.1 / Fig.3 / Fig.4 相当を保存する."""
+    """検証 8 手法を複数 seed で走らせ、Tab.1 / Fig.3 / Fig.4 相当を保存する."""
     log_every = max(1, args.epochs // 5)
     mse, curves, preds, target, x_raw = run_matrix(
         VERIFICATION_METHODS, noise, args, log_every)

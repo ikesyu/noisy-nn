@@ -115,7 +115,9 @@ Delta b_out   = -eta * mean_{m,n}( dL/dy )
 ```
 
 This is exact for the (linear) readout because `y` is linear in `W_out`; it does not
-propagate error into the hidden layers.
+propagate error into the hidden layers. (The `cov_jac_full` variant, §8.6, removes even
+this analytic `dL/dy`: the readout error too is estimated from forward-noise statistics,
+so no analytic loss derivative is used anywhere.)
 
 ## 5. Relation to backpropagation
 
@@ -197,14 +199,16 @@ at the output (`EnsembleMeanLayer`), so the network output — and therefore the
 target — is an **expected value**. Per-sample hidden activations are captured from the
 model with forward hooks.
 
-**Default verification set (what the script runs).** Running the script compares six methods:
-`backprop`, `cov_only`, `cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam`
-(the two `cov_jac` rows differ only in the local optimiser and both use `--jac-track` **on by
-default**). The gate/field methods below are kept in the code but run only with `--include-gates`.
-Use `--fit-check` for a focused figure confirming `cov_jac_adam` fits `sin(x)` as tightly as
-`backprop`. All methods are described next; the default six are a subset of the eight.
+**Default verification set (what the script runs).** Running the script compares eight methods:
+`backprop`, `cov_only`, `cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam`,
+`cov_jac_full_sgd`, `cov_jac_full_adam` (the sgd/adam pairs differ only in the local optimiser
+and all `cov_jac*` rows use `--jac-track` **on by default**; `cov_jac_full` uses the `--jac-out`
+readout-error estimator, default `cov_m3`). The gate/field methods below are kept in the code but
+run only with `--include-gates`. Use `--fit-check` for a focused figure confirming
+`cov_jac_adam` / `cov_jac_full_adam` fit `sin(x)` as tightly as `backprop`. All methods are
+described next; the default eight are a subset of the nine.
 
-Eight learning methods are implemented:
+Nine learning methods are implemented:
 
 1. **`backprop`** — reference only. Ordinary PyTorch autograd (Adam) on the **same**
    selected model. It does use backward propagation; it is the exact-gradient baseline.
@@ -229,14 +233,19 @@ Eight learning methods are implemented:
    §8.3): the gate's `xi` credit, but from a paired `(+xi, -xi)` forward under identical
    crossing noise, `Cov(L(+xi)-L(-xi), xi)/(2 Var xi)`. Unbiased and low-variance *in
    principle*; a negative result on the binary crossing (see §8.3).
-8. **`cov_deriv_field_gate`** — proposed **noise-field / recruitment gate** (see §8.5):
+8. **`cov_jac_full`** — proposed: `cov_jac` with the **readout error also taken from forward
+   statistics** (see §8.6), `g_y = Cov_t(L, y)/Var_t(y) ~ dL/dy` on the pre-ensemble readout
+   fluctuation — the last analytic gradient removed. The raw estimator carries a **skewness
+   bias** that Adam amplifies; `--jac-out cov_m3` (default) or `--jac-out probe` corrects it
+   and restores backprop-level accuracy.
+9. **`cov_deriv_field_gate`** — proposed **noise-field / recruitment gate** (see §8.5):
    `cov_deriv` with each hidden update multiplied by the unit's noise-field strength
    `s_i`, `Delta W_l[i,j] *= s_i`. With `--field-sparsity 0` (default) the gate is
    all-ones and the rule is exactly `cov_deriv`; with `--field-sparsity f>0` a fraction
    `f` of hidden units are **un-recruited** (`s_i = 0` — zero forward noise, hence dead,
    **and** zero update), tying credit assignment to the NNN recruitment/noise-field idea.
 
-All eight start from identical initial weights. For the `cov_*` methods the network
+All nine start from identical initial weights. For the `cov_*` methods the network
 is updated with **no autograd / no `.backward()`** — manual tensor arithmetic under
 `torch.no_grad()`. Autograd is used only for the `backprop` reference.
 
@@ -655,6 +664,77 @@ left open.
 confirmed dead (zero activity variance) and receive exactly zero update; at `--field-sparsity 0`
 the rule reduces to `cov_deriv`.
 
+### 8.6 Covariance readout error (`cov_jac_full`) — removing the last analytic gradient
+
+**Motivation.** Every method above (including `cov_jac`) still computes the readout error
+**analytically**: `dL/dy = 2(y - t)` both seeds the `cov_jac` recursion and updates the readout
+weights (§4). This involves no weight transport (the readout is the last layer, so no
+transposed-weight backward would occur there anyway), but as a *claim* it leaves one analytic
+loss derivative in the loop. `cov_jac_full` removes it. The readout's pre-ensemble output
+`y_{(m)}` is a **continuous** quantity fluctuating under the forward noise, so the same
+per-input regression used everywhere else applies to it:
+
+```
+g_y[n] = Cov_T(L_n, y_n) / (Var_T(y_n) + eps)   ~=   dL_n / dy_n
+```
+
+used both as the recursion seed (`a[top] = g_y * W_hat_out`) and in the readout weight update
+(in place of `2(y - t)`). The network then only ever observes the **scalar per-sample loss** —
+no analytic derivative of the loss is used anywhere.
+
+**Finding — a skewness bias, invisible to SGD, amplified by Adam.** Because `L = (y - t)^2` is
+quadratic in `y`, the *population* regression coefficient is exactly
+
+```
+Cov(L, y) / Var(y) = 2 (E[y] - t) + E[eps^3] / Var(eps),        eps = y - E[y]
+```
+
+The second term — the **skewness** of the readout fluctuation (a weighted sum of binary
+crossings, hence skewed) — is a bias that does **not** vanish at convergence and does **not**
+average out with more samples. Verified directly on a partially-trained net: the correlation
+between the observed per-input bias and the measured `m3/Var` is **0.997**, and near convergence
+the bias rms (0.064) *exceeds* the true-signal rms (0.042). The training consequence (Gaussian,
+`H=64`, `t=64`, 1500 epochs, seed 0): with **Adam** the raw estimator converges exactly as fast
+as `cov_jac` (eval MSE ~0.006 by epoch 150) and then **drifts up** to ~0.029 — Adam normalises
+the gradient scale, so the small constant bias keeps pushing the weights off the solution. With
+**SGD** the drift is hidden (the step shrinks together with the gradient) and the floor matches
+`cov_jac_sgd`. This mirrors the §8.4 `cov_deriv`-vs-Adam finding from the opposite side: Adam
+amplifies whatever systematic error the credit estimator carries.
+
+**Fixes (`--jac-out`; both keep the no-analytic-`dL/dy` property).**
+
+- **`cov_m3` (DEFAULT)** — subtract the *observed* third central moment of `y` from the
+  covariance, `g_y = (Cov_T(L, y) - m3_T(y)) / Var_T(y)`. Pure forward statistics of the
+  observed `(L, y)` pair; for a quadratic loss the bias removal is exact in population.
+- **`probe`** — add a known **symmetric** probe `xi` (std `--out-probe-alpha`, default 0.2) to
+  the readout samples and regress the *probed* loss on it:
+  `g_y = Cov_T(L(y + xi), xi) / Var_T(xi)`. Since `E[xi^3] = 0`, this is unbiased for **any**
+  smooth loss — the general fallback when the loss is not quadratic. (Any symmetric
+  distribution works; a symmetric *uniform* probe is equally valid, which matters for the
+  digital-hardware story.)
+
+**Results** (8-pass predict, Gaussian, `H=64`, `t=64`, 1500 epochs, seed 0):
+
+| method (Adam) | final MSE | behaviour |
+|---|---|---|
+| `backprop` (reference) | 0.00069 | |
+| `cov_jac_adam` (analytic `dL/dy`) | 0.00056 | |
+| `cov_jac_full --jac-out cov` | 0.02907 | matches cov_jac's speed, then drifts (skew bias) |
+| `cov_jac_full --jac-out cov_m3` | **0.00070** | **matches backprop**; no drift |
+| `cov_jac_full --jac-out probe` | 0.00129 | near backprop; no drift |
+
+The SGD variants all land at 0.013–0.025, i.e. at the `cov_jac_sgd` optimisation floor
+(0.01374) — convergence *speed* is unaffected by the readout-error estimator in every case.
+
+**Takeaway.** The readout, too, can be trained purely from forward-noise statistics, completing
+the claim: **no analytic loss derivative anywhere**. The one caveat is a third instance of this
+document's recurring theme (§8.3 pathwise degeneracy, §8.4 *what to take the covariance
+against*): the crossing's binary output makes activity fluctuations **skewed**, so a naive
+loss-on-activity regression at the readout carries a skewness bias — removed either by a
+third-moment correction (quadratic loss, still forward-only) or by a symmetric probe (any
+loss). Hardware note: `cov_m3` costs one extra per-readout-unit accumulator (`mean(y^3)`), still
+counter/MAC-level; `probe` reuses the noise generator already present in the NNN.
+
 ## 9. Discussion — single-variable vs. multivariate weight mirror
 
 This section collects the analysis behind the one residual, *directional* error identified for
@@ -792,9 +872,14 @@ Between the diagonal slope and a full inverse there is a spectrum worth explorin
   the **Discussion (§9)**.
 - The method needs **multiple stochastic forward samples** (`t`) per update, trading
   compute/variance for the removal of the backward pass.
-- The **output layer uses a local readout gradient** on the ensemble mean, so the
-  demonstration removes backward propagation only from the hidden layers, not the
-  readout.
+- The **output layer uses a local readout gradient** on the ensemble mean **by default**, so
+  those runs remove backward propagation only from the hidden layers. **`cov_jac_full` (§8.6)
+  removes this last analytic derivative too** — the readout error is estimated as
+  `Cov_T(L, y)/Var_T(y)` — with one caveat: the raw estimator carries a **skewness bias**
+  `E[eps^3]/Var(eps)` of the crossing-induced readout fluctuation (sample-irreducible; Adam
+  amplifies it into a late-training drift). The default third-moment correction
+  (`--jac-out cov_m3`, exact for quadratic loss) or a symmetric probe (`--jac-out probe`, any
+  loss) removes it and restores backprop-level accuracy (0.00070 / 0.00129 vs 0.00069).
 - This is a **proof-of-concept**, not an optimized or validated hardware
   implementation; the regression task is a toy problem.
 - More realistic benchmarks (deeper nets, classification) and concrete resource
@@ -816,7 +901,12 @@ a noise-induced activation derivative**.
 - (for `cov_jac`) "reconstructs the backprop weight update from forward-noise covariance
   alone — a weight-transport-free weight mirror — whose credit is empirically an **unbiased**
   estimate of the true gradient (cosine ≈ 1.0), and which, with a local Adam step, **reaches
-  backprop-level final accuracy** on the toy task (MSE ~1e-3, matching the autograd baseline)".
+  backprop-level final accuracy** on the toy task (MSE ~1e-3, matching the autograd baseline)";
+- (for `cov_jac_full`) "the readout error too can be estimated from forward statistics
+  (skew-corrected covariance, or regression on a symmetric probe), so the full rule uses **no
+  analytic loss derivative anywhere** and still attains backprop-level accuracy" — stating
+  honestly that the *raw* readout covariance carries a skewness bias `E[eps^3]/Var(eps)` that
+  the correction removes (§8.6).
 
 **Claims to avoid:**
 
@@ -831,10 +921,12 @@ a noise-induced activation derivative**.
 python tmp/forward_noise_covariance_learning.py
 ```
 
-**The default run compares the six verification methods** — `backprop`, `cov_only`,
-`cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam` (both `cov_jac` rows use
-`--jac-track`, on by default; they differ only in the local optimiser). To **confirm
-`cov_jac_adam` fits `sin(x)` as tightly as backprop**, add the focused figure:
+**The default run compares the eight verification methods** — `backprop`, `cov_only`,
+`cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam`, `cov_jac_full_sgd`,
+`cov_jac_full_adam` (the sgd/adam pairs differ only in the local optimiser; all `cov_jac*` rows
+use `--jac-track`, on by default; `cov_jac_full` uses the `--jac-out` readout-error estimator,
+default `cov_m3`). To **confirm `cov_jac_adam` / `cov_jac_full_adam` fit `sin(x)` as tightly as
+backprop**, add the focused figure:
 
 ```bash
 python tmp/forward_noise_covariance_learning.py --fit-check                 # target vs backprop vs cov_jac_adam (+residuals, MSE)
@@ -880,6 +972,15 @@ python tmp/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64 -
 python tmp/forward_noise_covariance_learning.py --jac-ema 0.98                               # smoother, slower-tracking mirror
 ```
 
+`cov_jac_full` (§8.6) selects its readout-error estimator with `--jac-out`
+(`cov_m3` = skew-corrected covariance, default; `probe` = symmetric Gaussian probe with std
+`--out-probe-alpha`; `cov` = raw covariance, which shows the skewness-bias drift under Adam):
+
+```bash
+python tmp/forward_noise_covariance_learning.py --jac-out cov       # raw Cov(L,y): drifts with Adam (the §8.6 finding)
+python tmp/forward_noise_covariance_learning.py --jac-out probe --out-probe-alpha 0.2
+```
+
 The noise-field / recruitment gate (`cov_deriv_field_gate`, §8.5) uses `--field-sparsity`
 (default 0.0). At 0 it equals `cov_deriv`; a positive value makes that fraction of hidden units
 un-recruited (zero forward noise **and** zero update) on the shared network:
@@ -905,6 +1006,8 @@ half-width), `crossing-h=0.2`, `seed=0`, `device=cpu`, `hidden-lr-scale=1.0`,
 `slope=kde` (distribution-free crossing slope; `analytic` forces `phi'(d)`),
 `gate-block-size=8`, `gate-alpha=0.05`, `gate-mode=cyclic`, `jac-ema=0.9`,
 `jac-track=True` (Kolen–Pollack tracking + pooling on by default; `--no-jac-track` to disable),
+`jac-out=cov_m3` (skew-corrected covariance readout error for `cov_jac_full`; `probe` / `cov`
+selectable, `out-probe-alpha=0.2` — see §8.6),
 `field-sparsity=0.0` (all units recruited; `>0` makes that fraction of hidden units
 un-recruited — see §8.5), `fit-check=off`, `include-gates=off`, `save=None`. (For the *scalar*
 `cov_deriv` credit, `--opt adam` / `--lr-decay cosine` do **not** lower its floor — see §10; but
@@ -921,14 +1024,16 @@ The script displays three figures with `plt.show()` (four with `--fit-check`; us
 to write them as PNG instead):
 
 ```
-learning curves        # the verification methods (backprop, cov_only, cov_deriv_{analytic,kde}, cov_jac_{sgd,adam}[, gates])
+learning curves        # the verification methods (backprop, cov_only, cov_deriv_{analytic,kde}, cov_jac_{sgd,adam}, cov_jac_full_{sgd,adam}[, gates])
 predictions on sin(x)  # target and each method's prediction
 cov_deriv layer-1 stats# mean activity, g_z, and phi'(d) per hidden unit (from cov_deriv_kde)
-fit check (--fit-check)# focused: target vs backprop vs cov_jac_adam + residuals (tight-fit confirmation)
+fit check (--fit-check)# focused: target vs backprop vs cov_jac_adam vs cov_jac_full_adam + residuals
 ```
 
 The console also prints the final MSE of each method and a short interpretation: whether
 `cov_deriv_kde` **matches** `cov_deriv_analytic` (so the analytic `phi'` can be dropped), whether
-**`cov_jac_adam` reaches backprop level** (the headline result), and whether `cov_jac_adam` beats
-`cov_jac_sgd` (confirming the SGD floor is optimisation, not estimator bias). With
-`--include-gates` it additionally reports the gate/field comparisons (§8.1, §8.3, §8.5).
+**`cov_jac_adam` reaches backprop level** (the headline result), whether `cov_jac_adam` beats
+`cov_jac_sgd` (confirming the SGD floor is optimisation, not estimator bias), and whether
+**`cov_jac_full_adam` matches `cov_jac_adam`** (so the analytic readout `dL/dy` is not needed
+either, §8.6). With `--include-gates` it additionally reports the gate/field comparisons
+(§8.1, §8.3, §8.5).
