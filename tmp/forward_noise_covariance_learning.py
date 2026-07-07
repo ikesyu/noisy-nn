@@ -1,5 +1,5 @@
 """
-examples/forward_noise_covariance_learning.py
+tmp/forward_noise_covariance_learning.py
 
 Forward-Noise-Based Covariance Learning for Noise-modulated Neural Networks (NNNs)
 =================================================================================
@@ -82,16 +82,23 @@ Methods compared
                    spontaneous unit fluctuations.  Because xi is added at the PRE-activation
                    d, Cov(L, xi)/Var(xi) already estimates dL/dd = delta directly (no extra
                    phi'(d) factor -- see train_cov).
+  cov_deriv_field_gate : proposed -- NOISE-FIELD / RECRUITMENT GATE.  cov_deriv with each
+                   hidden update multiplied by the unit's noise-field strength s_i
+                   (Delta W_l[i,j] *= s_i).  With --field-sparsity 0 (default) s_i == 1 for
+                   all units, so the rule IS cov_deriv; with --field-sparsity f>0 a fraction
+                   f of hidden units are un-recruited (s_i = 0 -> zero forward noise, dead,
+                   AND zero update), linking credit assignment to the NNN recruitment/noise
+                   field.  A one-line gate on top of cov_deriv (see docs section 8.5).
 
 This is a proof-of-concept for hardware-friendly APPROXIMATE backpropagation, not an
 exact replacement.  See docs/forward_noise_covariance_learning.md.
 
 Run
 ---
-    python examples/forward_noise_covariance_learning.py
-    python examples/forward_noise_covariance_learning.py --noise uniform
-    python examples/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64
-    python examples/forward_noise_covariance_learning.py --gate-block-size 8 --gate-alpha 0.05
+    python tmp/forward_noise_covariance_learning.py
+    python tmp/forward_noise_covariance_learning.py --noise uniform
+    python tmp/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64
+    python tmp/forward_noise_covariance_learning.py --gate-block-size 8 --gate-alpha 0.05
 
 Displays three figures with plt.show() (no files are written).
 Requires only Python, PyTorch, NumPy, Matplotlib (+ the local nnn package).
@@ -178,7 +185,7 @@ def kde_slope(crossing_layer, d_clean: torch.Tensor) -> torch.Tensor:
 # good basis (the default init does not tile the 1-D input).
 # ============================================================
 def build_model(noise: str, hidden: int, sigma: float, radius: float, h: float,
-                t: int, device: torch.device):
+                t: int, device: torch.device, field: torch.Tensor = None):
     structure = [1, hidden, hidden, 1]
     if noise == "gaussian":
         net = model.SimpleNNNSample(structure=structure, std=sigma, h=h, t=t,
@@ -199,6 +206,25 @@ def build_model(noise: str, hidden: int, sigma: float, radius: float, h: float,
     with torch.no_grad():
         net.fcs[0].weight.copy_(w1)
         net.fcs[0].bias.copy_(-(w1.squeeze(1)) * centres)
+
+    # --- per-unit noise field (recruitment gate) read by cov_deriv_field_gate ---
+    # `net.noise_field[l]` is a [H] vector of each hidden unit's noise-field strength.
+    # When a non-trivial field is supplied it becomes a REAL noise field: the per-unit
+    # Gaussian std (or uniform radius) is scaled by it, so a zero-field unit gets NO
+    # noise -> it is deterministic (dead) and receives no update under the field gate.
+    # Default (field is None) -> all-ones, so the network and every other method are
+    # byte-identical to before (the scalar std/radius is left untouched).
+    n_hidden = len(structure) - 2
+    if field is None:
+        s = torch.ones(H, device=device)
+    else:
+        s = field.detach().to(device).float()
+        if noise == "gaussian":
+            net.std = sigma * s                                  # [H], broadcasts over [N,T,H]
+        else:
+            for cl in net.uniform_crossing:
+                cl.radius = radius * s
+    net.noise_field = [s for _ in range(n_hidden)]
     return net.to(device)
 
 
@@ -375,7 +401,7 @@ def covariance_credit(z_l, L, credit):
     return g_z.unsqueeze(1), g_z.mean(dim=0)                    # broadcast [N,1,H], unit [H]
 
 
-def cov_weight(d_next, z_prev):
+def cov_weight(d_next, z_prev, pool: bool = False):
     """WEIGHT MIRROR (cov_jac): estimate the forward weight W (d_next = W z_prev + b)
     from forward-noise covariance alone -- NO explicit transpose.
 
@@ -396,6 +422,13 @@ def cov_weight(d_next, z_prev):
     cz = z_prev - z_prev.mean(dim=1, keepdim=True)              # [N, T, Hi]
     cov = torch.einsum("nto,nti->noi", cd, cz) / d_next.shape[1]  # [N, Ho, Hi]
     var = (cz ** 2).mean(dim=1)                                 # [N, Hi]
+    if pool:
+        # Variance-weighted "within" pooling over inputs (idea 2): keep the per-input
+        # centering (so the between-input cross-unit confound is NOT reintroduced) but
+        # SUM numerator and denominator over inputs before dividing.  Because W is the
+        # SAME for every input (unlike the gradient), this uses all N*T samples for one
+        # estimate -> far lower variance than mean_n(cov_n / var_n).
+        return cov.sum(dim=0) / (var.sum(dim=0).unsqueeze(0) + EPS)  # [Ho, Hi]
     W = cov / (var.unsqueeze(1) + EPS)                          # [N, Ho, Hi]
     return W.mean(dim=0)                                        # [Ho, Hi]
 
@@ -416,9 +449,13 @@ class ManualOpt:
         self.m, self.v, self.step = {}, {}, {}
 
     def update(self, key: str, param, grad, lr: float):
+        """Apply the step in place and RETURN the decrement applied (delta = before -
+        after), so cov_jac can integrate the same known increment into its weight
+        mirrors (Kolen-Pollack tracking)."""
         if self.kind == "sgd":
-            param.data -= lr * grad
-            return
+            step = lr * grad
+            param.data -= step
+            return step
         if key not in self.m:
             self.m[key] = torch.zeros_like(grad)
             self.v[key] = torch.zeros_like(grad)
@@ -429,7 +466,9 @@ class ManualOpt:
         v.mul_(self.b2).addcmul_(grad, grad, value=1.0 - self.b2)
         m_hat = m / (1.0 - self.b1 ** self.step[key])
         v_hat = v / (1.0 - self.b2 ** self.step[key])
-        param.data -= lr * m_hat / (v_hat.sqrt() + self.eps)
+        step = lr * m_hat / (v_hat.sqrt() + self.eps)
+        param.data -= step
+        return step
 
 
 def lr_at(lr0: float, epoch: int, epochs: int, decay: str) -> float:
@@ -446,7 +485,8 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
               hidden_lr_scale: float = 1.0, credit: str = "per_input",
               credit_passes: int = 1, opt: str = "sgd", lr_decay: str = "none",
               log_every: int = 0, slope: str = "kde", gate_block_size: int = 8,
-              gate_alpha: float = 0.05, gate_mode: str = "cyclic", jac_ema: float = 0.9):
+              gate_alpha: float = 0.05, gate_mode: str = "cyclic", jac_ema: float = 0.9,
+              jac_track: bool = False):
     """Manual covariance learning on a library Sample/UniformSample model.
 
     Hidden layers: covariance credit (x local slope) from captured per-sample
@@ -478,12 +518,13 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
     forward-only, weight-transport-free reconstruction of true backprop.  Slope from KDE.
     """
     assert method in ("cov_only", "cov_deriv", "cov_deriv_gate", "cov_deriv_kde",
-                      "cov_deriv_gate_crn", "cov_jac")
+                      "cov_deriv_gate_crn", "cov_jac", "cov_deriv_field_gate")
     assert credit in ("pooled", "per_input")
     assert slope in ("kde", "analytic")
     gate = method == "cov_deriv_gate"
     crn = method == "cov_deriv_gate_crn"
     jac = method == "cov_jac"
+    field_gate = method == "cov_deriv_field_gate"
     W_ema = {}                                      # cov_jac: running weight mirrors
     cap = Capture(net)
     n_hidden = cap.n_hidden
@@ -557,9 +598,9 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
                 slope_full = [kde_slope(cap.crossings[l], d[l]) for l in range(n_hidden)]
                 slope_mean = [s.mean(dim=1) for s in slope_full]        # [N, H] each
                 # measure this epoch's forward weights from covariance, then EMA-smooth
-                meas = {"out": cov_weight(ys, z[-1])}                   # [1, H]  (readout)
+                meas = {"out": cov_weight(ys, z[-1], pool=jac_track)}   # [1, H]  (readout)
                 for l in range(1, n_hidden):
-                    meas[l] = cov_weight(d[l], z[l - 1])               # [H_l, H_{l-1}]
+                    meas[l] = cov_weight(d[l], z[l - 1], pool=jac_track)  # [H_l, H_{l-1}]
                 if not W_ema:
                     W_ema.update(meas)                                 # cold start
                 else:
@@ -611,6 +652,11 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
                         # finite difference over the +/-h thresholds on shared samples).
                         dz_dd = kde_slope(cap.crossings[l], d[l])           # ~ dz/dd, [N,T,H]
                         delta_hat = g_bcast * dz_dd
+                    if field_gate:
+                        # Gate the update by the per-unit noise field s_i (recruitment):
+                        # D W_l[i,j] *= s_i.  Un-recruited units (s_i = 0) are detached
+                        # and receive no update -- the one-line link to the NNN noise field.
+                        delta_hat = delta_hat * net.noise_field[l].view(1, 1, -1)
                 gW = torch.einsum("nto,nti->oi", delta_hat, z_prev[l]) / (N * T)
                 gb = delta_hat.mean(dim=(0, 1))
                 hidden_grads.append((gW, gb))
@@ -627,13 +673,24 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
             gbout = dL_dy.mean(dim=0)                            # [1]
 
             # --- apply updates via the manual optimiser (sgd or adam) ---
+            steps = {}
             for l in range(n_hidden):
-                optim.update(f"w{l}", net.fcs[l].weight, hidden_grads[l][0], lr_hidden)
+                steps[l] = optim.update(f"w{l}", net.fcs[l].weight,
+                                        hidden_grads[l][0], lr_hidden)
                 if net.fcs[l].bias is not None:
                     optim.update(f"b{l}", net.fcs[l].bias, hidden_grads[l][1], lr_hidden)
-            optim.update("wout", net.fcs[-1].weight, gWout, lr_t)
+            steps["out"] = optim.update("wout", net.fcs[-1].weight, gWout, lr_t)
             if net.fcs[-1].bias is not None:
                 optim.update("bout", net.fcs[-1].bias, gbout, lr_t)
+
+            # cov_jac Kolen-Pollack PREDICT (idea 1): the true weights just moved by the
+            # KNOWN increment -steps, so shift the mirrors by exactly the same amount.
+            # The covariance 'meas' (EMA-corrected above) then only has to pin down the
+            # STATIC initial offset instead of chasing a moving target -> no tracking lag.
+            if jac and jac_track:
+                W_ema["out"] = W_ema["out"] - steps["out"]
+                for l in range(1, n_hidden):
+                    W_ema[l] = W_ema[l] - steps[l]
 
             losses.append(float(((y - t_target) ** 2).mean()))
             last_stats = {"layer1": stats[0]}
@@ -692,8 +749,11 @@ def plot_predictions(x_raw, target, preds: dict):
     fig = plt.figure(figsize=(8, 5))
     plt.plot(x_raw[order], target[order], "k-", lw=2.5, label="target sin(x)")
     styles = {"backprop": "--", "cov_only": "-.", "cov_deriv": "-",
-              "cov_deriv_analytic": (0, (3, 1, 1, 1)), "cov_jac": (0, (1, 1)),
-              "cov_deriv_gate": ":", "cov_deriv_gate_crn": (0, (5, 1))}
+              "cov_deriv_kde": "-", "cov_deriv_analytic": (0, (3, 1, 1, 1)),
+              "cov_jac": (0, (1, 1)), "cov_jac_sgd": (0, (1, 1)),
+              "cov_jac_adam": (0, (4, 1, 1, 1)),
+              "cov_deriv_gate": ":", "cov_deriv_gate_crn": (0, (5, 1)),
+              "cov_deriv_field_gate": (0, (3, 1, 1, 1, 1, 1))}
     for name, y in preds.items():
         plt.plot(x_raw[order], y[order], linestyle=styles.get(name, "-"),
                  lw=1.6, label=name)
@@ -717,6 +777,38 @@ def plot_activity_stats(stats_layer: dict):
     axes[2].bar(idx, stats_layer["phi_prime"].numpy(), color="tab:red")
     axes[2].set_ylabel("local derivative\nmean phi'(d)")
     axes[2].set_xlabel("hidden unit index")
+    for ax in axes:
+        ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_fit_check(x_raw, target, preds: dict, focus=("backprop", "cov_jac_adam")):
+    """Focused confirmation figure: does cov_jac_adam approximate sin(x) as TIGHTLY as
+    backprop?  Overlays only the target and the `focus` methods, plus a residual panel and
+    the MSE in the legend, so the fit quality is unmistakable (rather than buried in the
+    all-methods plot)."""
+    order = np.argsort(x_raw)
+    colors = {"backprop": "tab:blue", "cov_jac_adam": "tab:red",
+              "cov_jac_sgd": "tab:green"}
+    fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
+                             gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(x_raw[order], target[order], "k-", lw=3.0, alpha=0.35, label="target sin(x)")
+    for name in focus:
+        if name not in preds:
+            continue
+        mse = float(np.mean((preds[name] - target) ** 2))
+        axes[0].plot(x_raw[order], preds[name][order], color=colors.get(name), lw=1.8,
+                     label=f"{name}  (MSE={mse:.2e})")
+        axes[1].plot(x_raw[order], (preds[name] - target)[order], color=colors.get(name),
+                     lw=1.2, label=name)
+    axes[0].set_ylabel("y")
+    axes[0].set_title("Fit check: cov_jac_adam vs backprop on y = sin(x)")
+    axes[0].legend()
+    axes[1].axhline(0.0, color="k", lw=0.6)
+    axes[1].set_ylabel("residual\n(pred - sin)")
+    axes[1].set_xlabel("x")
+    axes[1].legend(loc="upper right", fontsize=8)
     for ax in axes:
         ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -773,6 +865,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--jac-ema", type=float, default=0.9,
                    help="cov_jac: EMA rate for the running weight mirrors "
                         "W_hat = Cov(d_next,z)/Var(z) (higher = smoother/lower-variance) [0.9]")
+    p.add_argument("--jac-track", action=argparse.BooleanOptionalAction, default=True,
+                   help="cov_jac: Kolen-Pollack weight-mirror TRACKING (DEFAULT ON) -- "
+                        "integrate the known applied weight update into the mirrors (predict) "
+                        "and pool the mirror covariance over inputs (idea 1+2). Removes the "
+                        "mirror tracking lag. Use --no-jac-track to disable.")
+    p.add_argument("--fit-check", action="store_true",
+                   help="show an extra FOCUSED figure overlaying only sin(x), backprop and "
+                        "cov_jac_adam (+residuals, MSE) to confirm cov_jac_adam fits as "
+                        "tightly as backprop.")
+    p.add_argument("--save", type=str, default=None,
+                   help="directory to save the figures as PNG instead of plt.show() "
+                        "(useful headless / for the paper).")
+    p.add_argument("--include-gates", action="store_true",
+                   help="also run the perturbation/field gate methods (cov_deriv_gate, "
+                        "cov_deriv_gate_crn, cov_deriv_field_gate) in the comparison. They "
+                        "are kept in the code but OFF the default verification set.")
+    p.add_argument("--field-sparsity", type=float, default=0.0,
+                   help="cov_deriv_field_gate: fraction of hidden units with ZERO noise "
+                        "field (un-recruited: no forward noise AND no update). Applies a "
+                        "REAL per-unit noise field to the shared network. 0 -> all units "
+                        "recruited, byte-identical to before (default) [0.0]")
     return p.parse_args()
 
 
@@ -802,127 +915,123 @@ def main() -> None:
     print(f"  cov_deriv slope={args.slope} (DEFAULT 'kde' = distribution-free "
           f"(xor2-xor1)/(2h); 'analytic' = phi'(d))")
 
-    # identical initial weights for all three methods
+    # per-unit noise field shared by all networks (a real recruitment field): a fraction
+    # --field-sparsity of hidden units are un-recruited (zero field -> no noise, no update).
+    # Deterministic (own generator) so every fresh() network shares the same recruitment.
+    H = args.hidden_dim
+    if args.field_sparsity > 0.0:
+        g = torch.Generator().manual_seed(args.seed + 12345)
+        field = (torch.rand(H, generator=g) >= args.field_sparsity).float().to(device)
+        n_off = int((field == 0).sum())
+        print(f"  noise field: {n_off}/{H} hidden units un-recruited "
+              f"(sparsity={args.field_sparsity}); cov_deriv_field_gate gates on it")
+    else:
+        field = None
+
+    # identical initial weights for all methods
     net0 = build_model(args.noise, args.hidden_dim, args.sigma, args.radius,
-                       args.crossing_h, args.num_samples, device)
+                       args.crossing_h, args.num_samples, device, field=field)
     init_state = copy.deepcopy(net0.state_dict())
 
     def fresh():
         n = build_model(args.noise, args.hidden_dim, args.sigma, args.radius,
-                        args.crossing_h, args.num_samples, device)
+                        args.crossing_h, args.num_samples, device, field=field)
         n.load_state_dict(init_state)
         return n
 
+    # ============================================================
+    # Verification set (default): backprop, cov_only, cov_deriv_analytic, cov_deriv_kde,
+    # cov_jac_sgd, cov_jac_adam.  cov_jac uses --jac-track (DEFAULT ON).  The two cov_jac
+    # rows differ ONLY in the (local, FPGA-friendly) optimiser: sgd vs adam.  The gate/field
+    # methods are kept in the code but run only with --include-gates.
+    # ============================================================
+    losses, preds, stats = {}, {}, {}
+
+    def run(name, method, **kw):
+        print(f"\n[{name}] {kw.pop('_desc', method)}")
+        net = fresh()
+        lo, st = train_cov(net, x, t, args.noise, args.sigma, args.radius, method,
+                           args.lr, args.epochs, args.hidden_lr_scale, args.credit,
+                           args.credit_passes, kw.pop("opt", args.opt), args.lr_decay,
+                           log_every, **kw)
+        losses[name] = lo
+        preds[name] = predict(net, x)
+        stats[name] = st
+
     print("\n[backprop] (reference, autograd Adam on the same model)")
     net_bp = fresh()
-    bp_losses = train_backprop(net_bp, x, t, args.lr, args.epochs, log_every)
+    losses["backprop"] = train_backprop(net_bp, x, t, args.lr, args.epochs, log_every)
+    preds["backprop"] = predict(net_bp, x)
 
-    print("\n[cov_only] covariance credit only (no phi')")
-    net_co = fresh()
-    co_losses, _ = train_cov(net_co, x, t, args.noise, args.sigma, args.radius,
-                             "cov_only", args.lr, args.epochs, args.hidden_lr_scale,
-                             args.credit, args.credit_passes, args.opt, args.lr_decay,
-                             log_every)
+    run("cov_only", "cov_only", _desc="covariance credit only (no phi')")
+    run("cov_deriv_analytic", "cov_deriv", slope="analytic",
+        _desc="cov_deriv with the hand-coded analytic phi'(d) (ablation)")
+    run("cov_deriv_kde", "cov_deriv", slope="kde",
+        _desc="cov_deriv with the crossing's distribution-free (xor2-xor1)/(2h) slope")
+    run("cov_jac_sgd", "cov_jac", opt="sgd", jac_ema=args.jac_ema, jac_track=args.jac_track,
+        _desc="weight-mirror recursive credit, SGD (--jac-track=%s)" % args.jac_track)
+    run("cov_jac_adam", "cov_jac", opt="adam", jac_ema=args.jac_ema, jac_track=args.jac_track,
+        _desc="weight-mirror recursive credit, ADAM -- expected to match backprop "
+              "(--jac-track=%s)" % args.jac_track)
 
-    print("\n[cov_deriv] covariance credit x DISTRIBUTION-FREE crossing slope "
-          "(xor2-xor1)/(2h) -- DEFAULT proposed method")
-    net_cd = fresh()
-    cd_losses, cd_stats = train_cov(net_cd, x, t, args.noise, args.sigma, args.radius,
-                                    "cov_deriv", args.lr, args.epochs, args.hidden_lr_scale,
-                                    args.credit, args.credit_passes, args.opt,
-                                    args.lr_decay, log_every, slope=args.slope)
+    if args.include_gates:
+        run("cov_deriv_gate", "cov_deriv_gate", gate_block_size=args.gate_block_size,
+            gate_alpha=args.gate_alpha, gate_mode=args.gate_mode,
+            _desc="perturbation-gated credit Cov(L,xi)/Var(xi) on a rotating block")
+        run("cov_deriv_gate_crn", "cov_deriv_gate_crn", gate_block_size=args.gate_block_size,
+            gate_alpha=args.gate_alpha, gate_mode=args.gate_mode,
+            _desc="antithetic/common-random-number gate Cov(L(+xi)-L(-xi), xi)")
+        run("cov_deriv_field_gate", "cov_deriv_field_gate", slope=args.slope,
+            _desc="cov_deriv gated by the per-unit noise field s_i (recruitment)")
 
-    print("\n[cov_deriv_analytic] ablation: same but with the hand-coded analytic phi'(d)")
-    net_ca = fresh()
-    ca_losses, _ = train_cov(net_ca, x, t, args.noise, args.sigma, args.radius,
-                             "cov_deriv", args.lr, args.epochs, args.hidden_lr_scale,
-                             args.credit, args.credit_passes, args.opt, args.lr_decay,
-                             log_every, slope="analytic")
-
-    print("\n[cov_jac] structured/recursive covariance credit -- weight mirror "
-          "W_hat=Cov(d_next,z)/Var(z) (proposed)")
-    net_cj = fresh()
-    cj_losses, _ = train_cov(net_cj, x, t, args.noise, args.sigma, args.radius,
-                             "cov_jac", args.lr, args.epochs, args.hidden_lr_scale,
-                             args.credit, args.credit_passes, args.opt, args.lr_decay,
-                             log_every, jac_ema=args.jac_ema)
-
-    print("\n[cov_deriv_gate] perturbation-gated covariance credit -- Cov(L, xi) on a "
-          "rotating block (proposed)")
-    net_cg = fresh()
-    cg_losses, _ = train_cov(net_cg, x, t, args.noise, args.sigma, args.radius,
-                             "cov_deriv_gate", args.lr, args.epochs, args.hidden_lr_scale,
-                             args.credit, args.credit_passes, args.opt, args.lr_decay,
-                             log_every, gate_block_size=args.gate_block_size,
-                             gate_alpha=args.gate_alpha, gate_mode=args.gate_mode)
-
-    print("\n[cov_deriv_gate_crn] antithetic / common-random-number gate -- "
-          "Cov(L(+xi)-L(-xi), xi) (proposed)")
-    net_cr = fresh()
-    cr_losses, _ = train_cov(net_cr, x, t, args.noise, args.sigma, args.radius,
-                             "cov_deriv_gate_crn", args.lr, args.epochs, args.hidden_lr_scale,
-                             args.credit, args.credit_passes, args.opt, args.lr_decay,
-                             log_every, gate_block_size=args.gate_block_size,
-                             gate_alpha=args.gate_alpha, gate_mode=args.gate_mode)
-
-    preds = {
-        "backprop": predict(net_bp, x),
-        "cov_only": predict(net_co, x),
-        "cov_deriv": predict(net_cd, x),
-        "cov_deriv_analytic": predict(net_ca, x),
-        "cov_jac": predict(net_cj, x),
-        "cov_deriv_gate": predict(net_cg, x),
-        "cov_deriv_gate_crn": predict(net_cr, x),
-    }
-
-    plot_losses({"backprop": bp_losses, "cov_only": co_losses, "cov_deriv": cd_losses,
-                 "cov_deriv_analytic": ca_losses, "cov_jac": cj_losses,
-                 "cov_deriv_gate": cg_losses,
-                 "cov_deriv_gate_crn": cr_losses})
-    plot_predictions(x_raw, target_np, preds)
-    plot_activity_stats(cd_stats["layer1"])
+    figs = {"learning_curves": plot_losses(losses),
+            "predictions": plot_predictions(x_raw, target_np, preds),
+            "layer1_stats": plot_activity_stats(stats["cov_deriv_kde"]["layer1"])}
+    if args.fit_check:
+        figs["fit_check"] = plot_fit_check(x_raw, target_np, preds)
 
     # low-noise final MSE from the averaged (multi-pass) prediction
-    def final_mse(p):
-        return float(np.mean((p - target_np) ** 2))
-    fin = {k: final_mse(v) for k, v in preds.items()}
-    improved = fin["cov_deriv"] < fin["cov_only"]
-    analytic_matches = abs(fin["cov_deriv"] - fin["cov_deriv_analytic"]) <= 0.01
-    jac_beats_deriv = fin["cov_jac"] < fin["cov_deriv"]
-    gate_improved = fin["cov_deriv_gate"] < fin["cov_deriv"]
-    crn_beats_gate = fin["cov_deriv_gate_crn"] < fin["cov_deriv_gate"]
+    fin = {k: float(np.mean((v - target_np) ** 2)) for k, v in preds.items()}
+    deriv_matches = abs(fin["cov_deriv_kde"] - fin["cov_deriv_analytic"]) <= 0.01
+    jac_adam_near_bp = fin["cov_jac_adam"] <= max(2.0 * fin["backprop"], fin["backprop"] + 0.003)
+    order = ["backprop", "cov_only", "cov_deriv_analytic", "cov_deriv_kde",
+             "cov_jac_sgd", "cov_jac_adam"]
+    if args.include_gates:
+        order += ["cov_deriv_gate", "cov_deriv_gate_crn", "cov_deriv_field_gate"]
     print("\n================ SUMMARY ================")
     print(f"Model: nnn.{model_name}   (readout uses the ensemble-mean = expected value)")
-    print("Final MSE:")
-    for k in ("backprop", "cov_only", "cov_deriv", "cov_deriv_analytic", "cov_jac",
-              "cov_deriv_gate", "cov_deriv_gate_crn"):
-        print(f"  {k:18s}: {fin[k]:.5f}")
+    print("Final MSE (8-pass predict):")
+    for k in order:
+        print(f"  {k:20s}: {fin[k]:.5f}")
     print("\nInterpretation:")
-    print("  - backprop is the exact-gradient reference (autograd on the same model).")
-    print("  - cov_only  uses covariance credit ALONE for the hidden layers.")
-    print("  - cov_deriv (DEFAULT) = covariance credit x the crossing's OWN distribution-free")
-    print("    density slope (xor2-xor1)/(2h); no analytic noise model, no phi_prime().")
-    print(f"  - cov_deriv {'IMPROVED over' if improved else 'did NOT improve over'} "
-          f"cov_only (delta MSE = {fin['cov_only'] - fin['cov_deriv']:+.5f}).")
-    print(f"  - cov_deriv_analytic (hand-coded phi'(d)) {'MATCHES' if analytic_matches else 'does NOT match'} "
-          f"cov_deriv (delta MSE = {fin['cov_deriv'] - fin['cov_deriv_analytic']:+.5f}) "
+    print("  - backprop is the exact-gradient reference (autograd Adam on the same model).")
+    print("  - cov_deriv_kde = covariance credit x the crossing's OWN distribution-free")
+    print("    density slope (xor2-xor1)/(2h); cov_deriv_analytic uses the hand-coded phi'(d).")
+    print(f"  - cov_deriv_kde {'MATCHES' if deriv_matches else 'does NOT match'} "
+          f"cov_deriv_analytic (delta MSE = {fin['cov_deriv_analytic'] - fin['cov_deriv_kde']:+.5f}) "
           f"-> the analytic phi' is not needed.")
-    print("  - cov_jac = STRUCTURED/RECURSIVE credit: propagate the exact output error down")
-    print("    via weight mirrors W_hat=Cov(d_next,z)/Var(z) (a forward-only backprop recon).")
-    print(f"  - cov_jac {'IMPROVED over' if jac_beats_deriv else 'did NOT improve over'} "
-          f"cov_deriv (delta MSE = {fin['cov_deriv'] - fin['cov_jac']:+.5f}).")
-    print("  - cov_deriv_gate     : credit from an injected xi, Cov(L,xi)/Var(xi) "
-          "(unbiased but high variance).")
-    print(f"  - cov_deriv_gate {'IMPROVED over' if gate_improved else 'did NOT improve over'} "
-          f"cov_deriv (delta MSE = {fin['cov_deriv'] - fin['cov_deriv_gate']:+.5f}).")
-    print("  - cov_deriv_gate_crn : same xi but an ANTITHETIC (+xi,-xi) pair under common")
-    print("    random numbers, Cov(L(+xi)-L(-xi), xi)/(2Var) -- eta cancels -> low variance.")
-    print(f"  - cov_deriv_gate_crn {'IMPROVED over' if crn_beats_gate else 'did NOT improve over'} "
-          f"cov_deriv_gate (delta MSE = {fin['cov_deriv_gate'] - fin['cov_deriv_gate_crn']:+.5f}).")
+    print("  - cov_jac_{sgd,adam} = STRUCTURED/RECURSIVE credit via weight mirrors "
+          "W_hat=Cov(d_next,z)/Var(z)")
+    print(f"    (--jac-track={args.jac_track}); the two differ ONLY in the local optimiser.")
+    print(f"  - cov_jac_adam final MSE {fin['cov_jac_adam']:.5f} vs backprop {fin['backprop']:.5f}: "
+          f"{'REACHES backprop level' if jac_adam_near_bp else 'does NOT yet reach backprop level'}.")
+    print(f"  - cov_jac_adam {'beats' if fin['cov_jac_adam'] < fin['cov_jac_sgd'] else 'trails'} "
+          f"cov_jac_sgd (delta MSE = {fin['cov_jac_sgd'] - fin['cov_jac_adam']:+.5f}) "
+          f"-> the sgd 'floor' is optimisation, not estimator bias.")
+    print("  - Adam is a LOCAL per-weight rule -> keeps the no-weight-transport / "
+          "FPGA-friendly property.")
     print("=========================================")
 
-    print("\nOpening 3 figure windows (close them to exit)...")
-    plt.show()
+    if args.save:
+        import os
+        os.makedirs(args.save, exist_ok=True)
+        for name, fig in figs.items():
+            path = os.path.join(args.save, f"{name}.png")
+            fig.savefig(path, dpi=130)
+            print(f"  saved {path}")
+    else:
+        print(f"\nOpening {len(figs)} figure windows (close them to exit)...")
+        plt.show()
 
 
 if __name__ == "__main__":

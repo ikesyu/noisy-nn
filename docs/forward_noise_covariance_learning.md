@@ -11,7 +11,7 @@ loss and node activity, and (ii) convert that credit into weight updates using t
 *noise-induced* local derivative of the crossing activation.
 
 The accompanying example is
-[`examples/forward_noise_covariance_learning.py`](../examples/forward_noise_covariance_learning.py).
+[`tmp/forward_noise_covariance_learning.py`](../tmp/forward_noise_covariance_learning.py).
 
 ## 2. Motivation
 
@@ -197,7 +197,14 @@ at the output (`EnsembleMeanLayer`), so the network output — and therefore the
 target — is an **expected value**. Per-sample hidden activations are captured from the
 model with forward hooks.
 
-Seven learning methods are compared:
+**Default verification set (what the script runs).** Running the script compares six methods:
+`backprop`, `cov_only`, `cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam`
+(the two `cov_jac` rows differ only in the local optimiser and both use `--jac-track` **on by
+default**). The gate/field methods below are kept in the code but run only with `--include-gates`.
+Use `--fit-check` for a focused figure confirming `cov_jac_adam` fits `sin(x)` as tightly as
+`backprop`. All methods are described next; the default six are a subset of the eight.
+
+Eight learning methods are implemented:
 
 1. **`backprop`** — reference only. Ordinary PyTorch autograd (Adam) on the **same**
    selected model. It does use backward propagation; it is the exact-gradient baseline.
@@ -222,8 +229,14 @@ Seven learning methods are compared:
    §8.3): the gate's `xi` credit, but from a paired `(+xi, -xi)` forward under identical
    crossing noise, `Cov(L(+xi)-L(-xi), xi)/(2 Var xi)`. Unbiased and low-variance *in
    principle*; a negative result on the binary crossing (see §8.3).
+8. **`cov_deriv_field_gate`** — proposed **noise-field / recruitment gate** (see §8.5):
+   `cov_deriv` with each hidden update multiplied by the unit's noise-field strength
+   `s_i`, `Delta W_l[i,j] *= s_i`. With `--field-sparsity 0` (default) the gate is
+   all-ones and the rule is exactly `cov_deriv`; with `--field-sparsity f>0` a fraction
+   `f` of hidden units are **un-recruited** (`s_i = 0` — zero forward noise, hence dead,
+   **and** zero update), tying credit assignment to the NNN recruitment/noise-field idea.
 
-All six start from identical initial weights. For the `cov_*` methods the network
+All eight start from identical initial weights. For the `cov_*` methods the network
 is updated with **no autograd / no `.backward()`** — manual tensor arithmetic under
 `torch.no_grad()`. Autograd is used only for the `backprop` reference.
 
@@ -259,11 +272,11 @@ confound and yields an input-specific, near-unbiased `dL_n/dz`, which drops the 
 the `t` binary samples — separately removes the single-sample `diag(Var z)` shrinkage
 that would otherwise cap the readout. Together they make the method fit convincingly.
 
-**A straightforward extension (`cov_deriv_field_gate`).** Multiply each hidden update
-by a fixed or learnable per-unit noise-field gate `s_i` (e.g. a unit-wise `sigma`
-vector), `Delta W_l[i,j] *= s_i`. This connects credit assignment to the NNN
-recruitment/noise-field idea (units with zero field are detached and receive no
-update). It is a one-line change on top of `cov_deriv` and is left as an extension.
+**A straightforward extension (`cov_deriv_field_gate`), now implemented (see §8.5).**
+Multiply each hidden update by a fixed or learnable per-unit noise-field gate `s_i`
+(e.g. a unit-wise `sigma` vector), `Delta W_l[i,j] *= s_i`. This connects credit
+assignment to the NNN recruitment/noise-field idea (units with zero field are detached
+and receive no update). It is a one-line change on top of `cov_deriv`.
 
 ### 8.1 The perturbation gate (`cov_deriv_gate`)
 
@@ -271,7 +284,7 @@ update). It is a one-line change on top of `cov_deriv` and is left as an extensi
 regress the loss onto each unit's **own spontaneous** forward fluctuation
 `z - E[z]`. That fluctuation is large (the crossing output is binary), which gives a
 low-variance estimate, but it is **shared** across units that fluctuate together, so
-`Cov(L, z)/Var(z)` is *biased* by cross-unit interactions (see §6, §9). The perturbation
+`Cov(L, z)/Var(z)` is *biased* by cross-unit interactions (see §6, §10). The perturbation
 gate is intended to **reduce this covariance-credit bias by correlating the loss with an
 explicitly injected local perturbation, rather than with all spontaneous unit
 fluctuations** — turning the *implicit* node perturbation of §6 into an *explicit*,
@@ -329,7 +342,7 @@ honestly. The reason is a **bias/variance trade**, not a bug:
 
 So `cov_deriv_gate` is included as a **conceptually cleaner (unbiased) but higher-variance**
 credit rule that makes the §6 "implicit node perturbation" reading explicit, and as a direct
-demonstration of the bias/variance trade behind the residual floor discussed in §9.
+demonstration of the bias/variance trade behind the residual floor discussed in §10.
 
 > **A cleaner source of the same "perturbation" signal.** The gate injects an *external*
 > perturbation and pays a large variance for it. But the crossing activation **already
@@ -390,7 +403,7 @@ transposed-weight backward**, fully consistent with the method's constraint.
 `H=32` — while using **no analytic noise model at all**. So the hand-coded `phi_prime()` is
 not needed, and the default rule is the more faithful "NNN-native", distribution-agnostic
 form. (This addresses the *slope* factor `dz/dd`; it does **not** change the covariance
-*activity* credit `dL/dz`, so it does not by itself lower the residual floor of §9 — that
+*activity* credit `dL/dz`, so it does not by itself lower the residual floor of §10 — that
 floor lives in the `dL/dz` estimator, not in `phi'`. That estimator is the subject of §8.4.)
 
 ### 8.3 Antithetic / common-random-number gate (`cov_deriv_gate_crn`) — a negative result
@@ -446,7 +459,7 @@ Everything above estimates hidden credit from `Cov(L, z_i)` — the correlation 
 fluctuation with the **scalar global loss**. That single-variable regression **collapses the
 entire downstream network onto one number**, discarding all structure (which downstream units
 a hidden unit actually feeds, and how). This collapse is the source of the residual
-estimator-bias floor of §9. A natural question — *what else could we take the covariance
+estimator-bias floor of §10. A natural question — *what else could we take the covariance
 against?* — leads to a **structure-aware** credit that follows the actual computational graph.
 
 **Key building block (verified).** Because a pre-activation is **linear** in the previous
@@ -527,7 +540,224 @@ floor**, not a faster descent. A larger `--jac-ema` trades early noise for slowe
 free reconstruction of backprop that **pushes below the `cov_deriv` estimator-bias floor** at
 the cost of slower convergence — the most principled of the variants explored here.
 
-## 9. Limitations
+**Faster/lower-variance mirrors (`--jac-track`, Kolen–Pollack + pooling).** Two refinements
+attack the mirror's cost directly. (1) *Tracking (idea 1 / Kolen–Pollack):* we apply the weight
+update ourselves, so the true weights move by a **known** increment `-DW`; integrating that same
+`DW` into the mirror (`W_hat <- W_hat - DW`) makes it follow the moving weights **exactly**, so
+the covariance measurement only has to fix the *static* initial offset instead of chasing a moving
+target. (2) *Pooling (idea 2):* because `W` is **input-independent** (unlike the gradient), the
+per-input-centred mirror statistics can be summed over inputs, `W_hat = (sum_n Cov_t)/(sum_n Var_t)`
+— all `N*T` samples for one estimate. Per-input centring is kept, so the between-input cross-unit
+confound (the same one that made `pooled` worse than `per_input` for `cov_deriv`) is **not**
+reintroduced. Both are enabled by `--jac-track`.
+
+**Is there an irreducible (directional) bias, or only reducible estimation error?** Verified
+empirically: **`cov_jac`'s credit is an essentially *unbiased* estimate of the true backprop
+gradient.** Averaged over stochastic draws, the cosine similarity between `cov_jac`'s per-layer
+update and the exact autograd gradient is **≈ 0.9996–1.0000 with magnitude ratio ≈ 1.0** for every
+layer (input→h1, h1→h2, readout), both untrained and partially trained. This is structurally
+different from `cov_deriv`: `Cov(L, z)/Var(z)` collapses the whole downstream onto the scalar `L`,
+a linearisation whose bias does **not** vanish with more samples (a real floor, §10); `cov_jac`
+never collapses — it recovers the actual weights (the mirror hits Pearson `r ≈ 1.0`, magnitude
+`≈ 1.0`, already at `t = 64` under pooling) and runs the exact chain rule, so its error is
+**reducible estimation variance, not a directioned bias**. Consequently more samples/updates (and
+matching the optimiser) *do* drive `cov_jac` toward the backprop solution; the practical gap is
+dominated by **optimisation** (`sgd`, `lr=1e-2` vs the Adam baseline) and small finite-sample
+mirror variance, both reducible. The measured benefit of `--jac-track` in this regime is modest
+(~2% final MSE) precisely *because* the mirror is already near-exact at `t = 64` — the refinements
+bind when the mirror is the bottleneck (small `t`, high `lr`, or deeper nets), not here.
+
+**Confirmation — with a matched (Adam) optimiser, `cov_jac+track` reaches backprop-level final
+error.** Because the gradient is essentially unbiased, the residual gap must be optimisation, and
+it is: swapping SGD for Adam (a *local* per-weight rule that keeps the no-weight-transport /
+FPGA-friendly property — it never touches the backward path) collapses the gap almost entirely
+(H=32, t=64, 1500 epochs, seed 0, `--jac-track`):
+
+| method | optimiser | final MSE (8-pass predict) |
+|---|---|---|
+| backprop (reference) | Adam `lr=1e-2` | **0.0011** |
+| `cov_jac+track` | Adam `lr=3e-3` | **0.0012** |
+| `cov_jac+track` | Adam `lr=1e-2` | 0.0015 |
+| `cov_jac+track` | **SGD** `lr=1e-2` | 0.0302 |
+
+So the ~0.03 "floor" of `cov_jac` was an **SGD artefact, not an estimator bias**: Adam drops it
+~25× to **backprop level** (0.0012 vs 0.0011). Note this is the *opposite* of `cov_deriv`, where
+Adam makes things **worse** (§10): Adam's `1/sqrt(v)` normalisation amplifies variance, which hurts
+`cov_deriv`'s high-variance scalar-`Cov(L,z)` credit but is harmless for `cov_jac`'s low-variance,
+near-exact-gradient credit. This is the sharpest evidence that `cov_jac` carries **no irreducible
+directional bias** in this regime — a forward-only, weight-transport-free rule that attains the
+exact-backprop solution.
+
+**The one conditional caveat (where a directional bias *would* appear).** The single-variable
+mirror `Cov(d, z_i)/Var(z_i)` equals `W_{ji}` only if a layer's units are **uncorrelated**. This
+holds exactly for the first hidden layer (independent injected noise at a fixed input) and remains
+**empirically** near-exact for deeper layers here (`r ≈ 1.0`), because each unit's *own* crossing
+noise dominates its variance and swamps the small shared-upstream correlation. But it is
+**regime-dependent**: with weak injected noise relative to the deterministic drive, or in deeper
+nets where correlations compound, the diagonal mirror would pick up neighbour weights — a
+directional, **sample-irreducible** bias. The principled fix is the **multivariate** mirror
+`W_hat = Cov(d, z) · Cov(z, z)^{-1}` (exact by the linearity `d = W z + b`), at `O(H^3)` per layer
+and needing more samples to condition `Cov(z, z)`. The KDE-slope bandwidth bias `O(h^2)` is shared
+with the autograd baseline (same `coeff`), so it is not a relative gap.
+
+**Tested — the bias is real but empirically small in these regimes.** Driving the readout layer's
+own noise weak (so upstream-driven cross-unit correlation dominates) does induce the predicted
+directional bias, and it is confirmed **sample-irreducible**: at `sigma_readout = 0.05` the
+single-variable readout mirror sits at Pearson `r ≈ 0.994` and **stays there** as `T` grows
+`128 -> 8192` (not a variance that averages out), while the **multivariate** mirror is exact
+(`r = 1.000`) throughout; the first-layer mirror stays clean (`r = 1.000`) as a control. But the
+magnitude is modest: even with **three hidden layers** and strongly decreasing per-layer noise
+(`stds = [0.5, 0.2, 0.05]`), the deepest single-variable mirror only falls to `r ≈ 0.991`
+(off-diagonal `|corr|` of the layer's units stays `≤ 0.012`) — the confound does **not** compound
+sharply with depth here, because each unit's intrinsic crossing noise keeps the units
+well-decorrelated. So the single-variable mirror is robust for these NNN regression nets; the
+multivariate mirror is the exact fallback if a strongly cross-correlated regime (dense/large
+weights, a shared noise field, or much deeper nets) ever makes the diagonal approximation bite.
+The single-variable-vs-multivariate mirror trade-off is discussed in full in the **Discussion (§9)**.
+
+### 8.5 Noise-field / recruitment gate (`cov_deriv_field_gate`)
+
+Everything above updates **every** hidden unit. The NNN, however, has an intrinsic **noise
+field** (a per-unit noise strength / recruitment level): a unit with zero field injects no
+noise, so its crossing output cannot fluctuate and it carries no information. `cov_deriv_field_gate`
+makes credit assignment **respect that field** — the one-line extension flagged in §8.
+
+**Mechanism.** Each hidden unit `i` has a noise-field strength `s_i`. The `cov_deriv` update is
+gated by it,
+
+```
+delta_hat[l, i] = g_z[l, i] * phi_bar'(d_{l,i}) * s_i        (Delta W_l[i,j] *= s_i)
+```
+
+so an **un-recruited** unit (`s_i = 0`) receives **no update** and is detached from learning.
+Crucially the field is a *real* per-unit noise field, not just an update mask: the example scales
+each unit's Gaussian `std` (or uniform `radius`) by `s_i`, so an `s_i = 0` unit gets **zero
+forward noise** — it is deterministic across the `t` samples, its crossing output is constant
+(dead), and its covariance credit `Cov(L, z_i)/Var(z_i)` is therefore ≈ 0 anyway. The gate makes
+this exact (a hard zero) rather than an `eps`-regularised near-zero, and generalises to any
+continuous field `s_i ∈ [0, 1]` (a soft recruitment weighting).
+
+**Consistency check.** With `--field-sparsity 0` (default) the field is all-ones, the gate is a
+no-op, and the rule is **exactly `cov_deriv`** (the small MSE difference in the printout is only
+training stochasticity — the two nets draw independent forward noise). With `--field-sparsity f>0`
+a deterministic fraction `f` of hidden units per layer are set to `s_i = 0`; the shared network
+then genuinely has that many dead units, and only `cov_deriv_field_gate` explicitly refrains from
+updating them (the other methods leave them at their initial, non-learning state via the ≈0
+covariance credit).
+
+**Why it is included.** It is the cheapest possible bridge from the forward-noise credit rule to
+the NNN's **recruitment/noise-field** machinery (`noise_field_demo.py`, `recruitment_field_demo.py`):
+credit assignment and neuron recruitment share the same per-unit field. It is a proof-of-concept
+hook — a learnable `s_i` (recruiting units where credit is high) is the natural next step and is
+left open.
+
+**Status.** Implemented as the `cov_deriv_field_gate` method and verified: un-recruited units are
+confirmed dead (zero activity variance) and receive exactly zero update; at `--field-sparsity 0`
+the rule reduces to `cov_deriv`.
+
+## 9. Discussion — single-variable vs. multivariate weight mirror
+
+This section collects the analysis behind the one residual, *directional* error identified for
+`cov_jac` (§8.4) and discusses the **multivariate weight mirror** as its principled — but not
+free — fix. The multivariate mirror is **not** part of the shipped example; it was validated in a
+standalone probe and is recorded here as Discussion / future work.
+
+### 9.1 Why the single-variable mirror is a diagonal approximation
+
+`cov_jac` recovers each forward weight with a **single-variable** regression slope,
+
+```
+W_hat[l+1]_{ji} = Cov_t(d^{l+1}_j, z^l_i) / Var_t(z^l_i).
+```
+
+Because the pre-activation is exactly linear, `d^{l+1}_j = sum_k W_{jk} z^l_k + b_j`,
+
+```
+Cov(d^{l+1}_j, z^l_i) = sum_k W_{jk} Cov(z^l_k, z^l_i),
+so   W_hat_{ji} = W_{ji} + sum_{k != i} W_{jk} * Cov(z^l_k, z^l_i) / Var(z^l_i).
+```
+
+The second term is the **bias**: it leaks a unit's *neighbours'* weights in proportion to the
+**off-diagonal covariance** of the layer's activations. It vanishes iff the layer's units are
+mutually uncorrelated (`Cov(z, z)` diagonal). Its sign and size are set by the neighbour weights
+and the correlations, so it is **directional**, and it is a property of the *true* covariance, so
+**more samples do not remove it** (confirmed empirically: the single-variable readout mirror sits
+at `r ≈ 0.994` and stays there as `T` grows `128 -> 8192`, §8.4). In short, the single-variable
+mirror is the exact regression **pre-multiplied by the diagonal of `Cov(z, z)^{-1}` instead of its
+full inverse**.
+
+### 9.2 The exact object: the multivariate mirror
+
+Since `d = W z + b` is exactly linear, the **ordinary least-squares** estimate is unbiased under
+regressor correlation:
+
+```
+W_hat = Cov(d, z) * Cov(z, z)^{-1}       (per input, then pooled over inputs; ridge-regularised).
+```
+
+In the standalone probe this recovers `W` with Pearson `r = 1.000`, magnitude ratio `1.00`, in
+**every** tested regime — weak readout noise (`sigma = 0.05`) and three hidden layers with strongly
+decreasing per-layer noise — where the single-variable mirror falls to `r ≈ 0.99`. So the
+multivariate mirror **removes the only identified directional bias** exactly.
+
+### 9.3 The trade-off — exactness vs. locality/cost
+
+The multivariate mirror is not free, and the cost is exactly of the kind the method set out to
+avoid:
+
+- **Compute/state:** an `O(H^3)` inverse (or linear solve) per layer per update and `O(H^2)` state
+  for the full `Cov(z, z)`, versus `O(H^2)` / `O(H)` for the diagonal mirror.
+- **Conditioning:** `Cov(z, z)` must be well conditioned — it needs more samples, and ridge /
+  shrinkage regularisation, especially for large `H` or small `t`, or near-collinear units.
+- **Hardware / locality:** the inverse is a **globally coupled, non-local** operation over a whole
+  layer. It does **not** reintroduce weight transport (we still never read `W^T`), but it *does*
+  partly give back the streaming / per-unit-locality advantage that motivated the forward-noise
+  approach. So it is **less FPGA-friendly** than the diagonal mirror.
+
+The single-variable mirror is therefore the better **default** — cheap, local, and empirically
+near-exact in these NNN nets — while the multivariate mirror is the exact **fallback** for regimes
+where the diagonal approximation would bite.
+
+### 9.4 Cheaper middle grounds (considerations)
+
+Between the diagonal slope and a full inverse there is a spectrum worth exploring before paying
+`O(H^3)`:
+
+- **Shrinkage / block-diagonal `Cov(z, z)^{-1}`:** correct only the largest off-diagonal
+  correlations (e.g. within local blocks of units), leaving the rest diagonal.
+- **Inverse-free iterative solves:** apply `Cov(z, z)^{-1}` via a few Newton–Schulz or
+  conjugate-gradient / Richardson steps — mostly matmul/MAC, streamable, no explicit inversion.
+- **Recursive least squares (RLS) + Kolen–Pollack predict:** RLS maintains an *inverse-covariance*
+  estimate incrementally; combined with the §8.4 trick of integrating the **known** applied
+  increment `ΔW` (predict) and using RLS only to correct the static offset, this is the most
+  principled hardware-aware route to a multivariate-quality mirror without a per-step inverse.
+- **Whiten by design:** if the injected noise field or the connectivity were shaped so that
+  `Cov(z, z)` is diagonal by construction (decorrelated per-unit fluctuations), the *diagonal*
+  mirror would be exact for free — a design lever that ties back to the NNN noise-field idea and
+  the recruitment gate (§8.5).
+
+### 9.5 Recommendation and open questions
+
+- **Keep the single-variable mirror as the default** (`cov_jac`, `--jac-track`): local, cheap, and
+  within noise of the exact gradient here (cosine ≈ 1.0, §8.4).
+- **Offer a multivariate / RLS mirror as opt-in** for strongly cross-correlated regimes: dense or
+  large-magnitude weights, structured/shared noise fields, correlated-feature classification
+  tasks, or much deeper nets.
+- **Characterise the crossover.** A useful manuscript result would be a scalar diagnostic — mean
+  `|off-diagonal corr|` of a layer, or the condition number of `Cov(z, z)` — and the threshold at
+  which the diagonal mirror's directional bias exceeds the optimisation/variance floor. That
+  threshold is where the multivariate mirror earns its `O(H^3)`.
+- **Depth.** The recursion multiplies per-layer mirror estimates, so even small per-layer
+  directional biases can **compound**; the 2–3 hidden-layer tests show it staying small, but a
+  whitening or multivariate correction may matter more for deep nets. Untested beyond three hidden
+  layers.
+- **Relation to known ideas.** The whole mirror mechanism is the **weight mirror** of Akrout et al.
+  (2019) realised natively by the NNN's intrinsic noise; the `--jac-track` predict step is
+  **Kolen–Pollack** (1994); the multivariate upgrade is ordinary multivariate regression / a
+  whitened weight mirror. The NNN's distinguishing feature is that the perturbations these methods
+  need are **already present for free** in every stochastic forward pass.
+
+## 10. Limitations
 
 - `Cov(L, z)/Var(z)` is a **single-variable regression approximation** of `dL/dz`:
   even with `--credit per_input` it linearises and ignores cross-unit interactions
@@ -546,9 +776,20 @@ the cost of slower convergence — the most principled of the variants explored 
   higher-order/curvature-corrected, or a genuinely small-perturbation regime), which
   is beyond this proof-of-concept. The `--opt` / `--lr-decay` knobs are provided for
   experimentation but default to `sgd` / `none`. **`cov_jac` (§8.4) is exactly such a
-  less-biased estimator** — it partially lowers this floor (~30% at `t=64`) by propagating
-  credit through the graph instead of collapsing onto scalar `L`, at the cost of slower
-  convergence; it does not yet reach backprop level.
+  less-biased estimator** — it propagates credit through the graph instead of collapsing
+  onto scalar `L`, and its gradient is essentially *unbiased* (cosine ≈ 1.0 vs the true
+  autograd gradient, §8.4). Its own `sgd` "floor" (~0.03) is therefore **not** an estimator
+  bias but an optimisation artefact: `cov_jac+track` with **Adam** (still weight-transport-
+  free) reaches **backprop-level** final error (~0.0012 vs ~0.0011, §8.4). This is the
+  opposite of `cov_deriv` above, whose floor *is* estimator bias and which Adam worsens —
+  the difference is gradient variance (low for `cov_jac`, high for `cov_deriv`).
+- **`cov_jac`'s weight mirror carries one *conditional* directional bias** — the
+  single-variable slope `Cov(d, z_i)/Var(z_i)` is confounded by cross-unit correlations of
+  the layer's activations, a bias that does **not** vanish with samples. It is **empirically
+  small** here (single-var recovery `r ≥ 0.99` even under weak noise / three hidden layers,
+  because the intrinsic per-unit noise keeps units decorrelated), and the **multivariate**
+  mirror removes it exactly at `O(H^3)` cost. Full treatment and cheaper alternatives are in
+  the **Discussion (§9)**.
 - The method needs **multiple stochastic forward samples** (`t`) per update, trading
   compute/variance for the removal of the backward pass.
 - The **output layer uses a local readout gradient** on the ensemble mean, so the
@@ -559,7 +800,7 @@ the cost of slower convergence — the most principled of the variants explored 
 - More realistic benchmarks (deeper nets, classification) and concrete resource
   estimates are needed before any hardware-superiority claim.
 
-## 10. Implications for manuscript writing
+## 11. Implications for manuscript writing
 
 The algorithm can be positioned as **a hardware-friendly approximate
 backpropagation method for NNNs, combining forward-noise-based credit assignment with
@@ -571,40 +812,57 @@ a noise-induced activation derivative**.
   through transposed weight matrices";
 - "reuses forward stochastic samples as implicit node perturbations";
 - "uses the statistical derivative of the crossing activation to convert activity
-  credit into weight updates".
+  credit into weight updates";
+- (for `cov_jac`) "reconstructs the backprop weight update from forward-noise covariance
+  alone — a weight-transport-free weight mirror — whose credit is empirically an **unbiased**
+  estimate of the true gradient (cosine ≈ 1.0), and which, with a local Adam step, **reaches
+  backprop-level final accuracy** on the toy task (MSE ~1e-3, matching the autograd baseline)".
 
 **Claims to avoid:**
 
 - "fully replaces backpropagation";
-- "exactly computes backpropagation gradients";
+- "exactly computes backpropagation gradients" (the credit is *near*-exact, cosine ≈ 1.0, not
+  bit-exact; and one conditional mirror bias exists, §9);
 - "proves FPGA superiority" (without an actual hardware implementation).
 
-## 11. How to run
+## 12. How to run
 
 ```bash
-python examples/forward_noise_covariance_learning.py
+python tmp/forward_noise_covariance_learning.py
+```
+
+**The default run compares the six verification methods** — `backprop`, `cov_only`,
+`cov_deriv_analytic`, `cov_deriv_kde`, `cov_jac_sgd`, `cov_jac_adam` (both `cov_jac` rows use
+`--jac-track`, on by default; they differ only in the local optimiser). To **confirm
+`cov_jac_adam` fits `sin(x)` as tightly as backprop**, add the focused figure:
+
+```bash
+python tmp/forward_noise_covariance_learning.py --fit-check                 # target vs backprop vs cov_jac_adam (+residuals, MSE)
+python tmp/forward_noise_covariance_learning.py --fit-check --save out/     # save all figures as PNG instead of plt.show()
+python tmp/forward_noise_covariance_learning.py --include-gates             # also run the gate/field methods (off by default)
+python tmp/forward_noise_covariance_learning.py --no-jac-track              # disable Kolen-Pollack mirror tracking
 ```
 
 Select the noise/model and arguments:
 
 ```bash
-python examples/forward_noise_covariance_learning.py --noise gaussian   # SimpleNNNSample (default)
-python examples/forward_noise_covariance_learning.py --noise uniform    # SimpleNNNUniformSample
-python examples/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64 --hidden-dim 64
+python tmp/forward_noise_covariance_learning.py --noise gaussian   # SimpleNNNSample (default)
+python tmp/forward_noise_covariance_learning.py --noise uniform    # SimpleNNNUniformSample
+python tmp/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64 --hidden-dim 64
 ```
 
 Compare the credit estimators (this is the decisive knob):
 
 ```bash
-python examples/forward_noise_covariance_learning.py --credit per_input --num-samples 100  # good fit
-python examples/forward_noise_covariance_learning.py --credit pooled    --num-samples 100  # underfits (ablation)
+python tmp/forward_noise_covariance_learning.py --credit per_input --num-samples 100  # good fit
+python tmp/forward_noise_covariance_learning.py --credit pooled    --num-samples 100  # underfits (ablation)
 ```
 
 Perturbation-gate knobs (`cov_deriv_gate`, §8.1):
 
 ```bash
-python examples/forward_noise_covariance_learning.py --gate-block-size 8 --gate-alpha 0.05 --gate-mode cyclic
-python examples/forward_noise_covariance_learning.py --gate-alpha 0.3 --num-samples 128   # higher SNR / lower-variance credit
+python tmp/forward_noise_covariance_learning.py --gate-block-size 8 --gate-alpha 0.05 --gate-mode cyclic
+python tmp/forward_noise_covariance_learning.py --gate-alpha 0.3 --num-samples 128   # higher SNR / lower-variance credit
 ```
 
 `cov_deriv_gate_crn` (§8.3) reuses the same `--gate-*` knobs; the antithetic pair doubles
@@ -612,12 +870,22 @@ the forward count per credit pass. It is a deliberately kept negative result —
 beat `cov_deriv_gate` on the binary crossing (see §8.3).
 
 The structured/recursive `cov_jac` (§8.4) uses `--jac-ema` (EMA rate for the weight mirrors,
-default 0.9). It **beats `cov_deriv`** but needs the **full budget** — it converges slower and
-overtakes late, so compare at `--epochs 1500`+:
+default 0.9) and `--jac-track` (Kolen–Pollack mirror tracking + input-pooling, **on by default**;
+`--no-jac-track` to disable). The two `cov_jac` rows differ only in the local optimiser:
+`cov_jac_sgd` shows the SGD "floor" (~0.03), and `cov_jac_adam` — Adam being a local, still
+weight-transport-free per-weight rule — reaches **backprop-level** final error (~0.0011, §8.4):
 
 ```bash
-python examples/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64   # cov_jac < cov_deriv at convergence
-python examples/forward_noise_covariance_learning.py --jac-ema 0.98                    # smoother, slower-tracking mirror
+python tmp/forward_noise_covariance_learning.py --epochs 1500 --num-samples 64 --fit-check  # cov_jac_adam ~ backprop
+python tmp/forward_noise_covariance_learning.py --jac-ema 0.98                               # smoother, slower-tracking mirror
+```
+
+The noise-field / recruitment gate (`cov_deriv_field_gate`, §8.5) uses `--field-sparsity`
+(default 0.0). At 0 it equals `cov_deriv`; a positive value makes that fraction of hidden units
+un-recruited (zero forward noise **and** zero update) on the shared network:
+
+```bash
+python tmp/forward_noise_covariance_learning.py --field-sparsity 0.3   # 30% of hidden units un-recruited (dead)
 ```
 
 The distribution-free slope (§8.2) is the **default** for `cov_deriv` (`--slope kde`); it is
@@ -626,8 +894,8 @@ most striking under `--noise uniform`, where it matches the analytic-`phi'` abla
 hand-coded `phi'(d)` instead:
 
 ```bash
-python examples/forward_noise_covariance_learning.py --noise uniform          # cov_deriv uses kde slope (default)
-python examples/forward_noise_covariance_learning.py --slope analytic         # force hand-coded phi'(d)
+python tmp/forward_noise_covariance_learning.py --noise uniform          # cov_deriv uses kde slope (default)
+python tmp/forward_noise_covariance_learning.py --slope analytic         # force hand-coded phi'(d)
 ```
 
 CPU-friendly defaults: `noise=gaussian`, `credit=per_input`, `credit-passes=1`,
@@ -635,26 +903,32 @@ CPU-friendly defaults: `noise=gaussian`, `credit=per_input`, `credit-passes=1`,
 model's internal `t`), `lr=1e-2`, `sigma=0.5` (Gaussian std), `radius=1.0` (uniform
 half-width), `crossing-h=0.2`, `seed=0`, `device=cpu`, `hidden-lr-scale=1.0`,
 `slope=kde` (distribution-free crossing slope; `analytic` forces `phi'(d)`),
-`gate-block-size=8`, `gate-alpha=0.05`, `gate-mode=cyclic`, `jac-ema=0.9`
-(`--opt adam` / `--lr-decay cosine` are available but do not lower the floor — see §9).
+`gate-block-size=8`, `gate-alpha=0.05`, `gate-mode=cyclic`, `jac-ema=0.9`,
+`jac-track=True` (Kolen–Pollack tracking + pooling on by default; `--no-jac-track` to disable),
+`field-sparsity=0.0` (all units recruited; `>0` makes that fraction of hidden units
+un-recruited — see §8.5), `fit-check=off`, `include-gates=off`, `save=None`. (For the *scalar*
+`cov_deriv` credit, `--opt adam` / `--lr-decay cosine` do **not** lower its floor — see §10; but
+for `cov_jac`'s near-exact gradient, `--opt adam` **is** what reaches backprop level — §8.4.)
 A fast smoke test:
 
 ```bash
-python examples/forward_noise_covariance_learning.py --epochs 50 --num-samples 16 --hidden-dim 16
+python tmp/forward_noise_covariance_learning.py --epochs 50 --num-samples 16 --hidden-dim 16
 ```
 
-## 12. Figures
+## 13. Figures
 
-The script displays three figures with `plt.show()` (nothing is written to disk):
+The script displays three figures with `plt.show()` (four with `--fit-check`; use `--save DIR`
+to write them as PNG instead):
 
 ```
-learning curves        # backprop, cov_only, cov_deriv, cov_deriv_analytic, cov_jac, cov_deriv_gate[_crn]
-predictions on sin(x)  # target and the seven method predictions
-cov_deriv layer-1 stats# mean activity, g_z, and phi'(d) per hidden unit
+learning curves        # the verification methods (backprop, cov_only, cov_deriv_{analytic,kde}, cov_jac_{sgd,adam}[, gates])
+predictions on sin(x)  # target and each method's prediction
+cov_deriv layer-1 stats# mean activity, g_z, and phi'(d) per hidden unit (from cov_deriv_kde)
+fit check (--fit-check)# focused: target vs backprop vs cov_jac_adam + residuals (tight-fit confirmation)
 ```
 
-The console also prints the final MSE of each method, a short interpretation, whether
-`cov_deriv` improved over `cov_only`, whether `cov_deriv_analytic` **matches** the default
-`cov_deriv` (so the analytic `phi'` can be dropped), whether **`cov_jac` improved over
-`cov_deriv`** (structured/recursive credit), whether `cov_deriv_gate` improved over
-`cov_deriv`, and whether `cov_deriv_gate_crn` improved over `cov_deriv_gate`.
+The console also prints the final MSE of each method and a short interpretation: whether
+`cov_deriv_kde` **matches** `cov_deriv_analytic` (so the analytic `phi'` can be dropped), whether
+**`cov_jac_adam` reaches backprop level** (the headline result), and whether `cov_jac_adam` beats
+`cov_jac_sgd` (confirming the SGD floor is optimisation, not estimator bias). With
+`--include-gates` it additionally reports the gate/field comparisons (§8.1, §8.3, §8.5).
