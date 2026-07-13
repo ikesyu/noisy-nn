@@ -27,11 +27,12 @@ import argparse
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
 from fncl_common import (add_common_args, finalize_args, make_task,
                          model_factory, config_dict, pearson, cosine,
-                         norm_ratio, write_text, save_json, savefig, fncl)
+                         norm_ratio, write_text, save_json, fncl)
+from fncl5_3_fig import (plot_mirror_scatter, plot_grad_cosine,
+                         plot_fidelity_composite)
 
 
 # ------------------------------------------------------------
@@ -134,54 +135,7 @@ def averaged(fn, draws: int) -> dict:
 
 
 # ------------------------------------------------------------
-# 図
-# ------------------------------------------------------------
-def plot_mirror_scatter(pairs, path):
-    """pairs: list of (title, W_hat, W_true, r)."""
-    fig, axes = plt.subplots(1, len(pairs), figsize=(4.2 * len(pairs), 4.0))
-    for ax, (title, w_hat, w_true, r) in zip(np.atleast_1d(axes), pairs):
-        a = w_true.detach().cpu().numpy().ravel()
-        b = w_hat.detach().cpu().numpy().ravel()
-        lim = max(np.abs(a).max(), np.abs(b).max()) * 1.1
-        ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.8, alpha=0.5)
-        ax.scatter(a, b, s=8, alpha=0.6)
-        ax.set_xlabel("true W")
-        ax.set_ylabel("mirror W_hat")
-        ax.set_title(f"{title}\nPearson r = {r:.4f}")
-        ax.grid(alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, path)
-
-
-def plot_grad_cosine(fid, path):
-    """fid[state][estimator][layer] = {"cos":, "ratio":} の層別棒グラフ."""
-    states = list(fid.keys())
-    layers = ["w0", "w1", "wout"]
-    fig, axes = plt.subplots(1, len(states), figsize=(5.2 * len(states), 4.0),
-                             sharey=True)
-    width = 0.35
-    xpos = np.arange(len(layers))
-    for ax, state in zip(np.atleast_1d(axes), states):
-        for k, est in enumerate(("cov_jac", "cov_deriv")):
-            vals = [fid[state][est][l]["cos"] for l in layers]
-            ax.bar(xpos + (k - 0.5) * width, vals, width, label=est)
-            for xp, v in zip(xpos + (k - 0.5) * width, vals):
-                ax.text(xp, min(v + 0.02, 1.05), f"{v:.3f}", ha="center",
-                        fontsize=7)
-        ax.axhline(1.0, color="k", lw=0.6, alpha=0.5)
-        ax.set_xticks(xpos)
-        ax.set_xticklabels(layers)
-        ax.set_ylim(0.0, 1.15)
-        ax.set_title(f"cosine vs autograd gradient ({state})")
-        ax.grid(alpha=0.3, axis="y")
-        ax.legend(fontsize=8)
-    np.atleast_1d(axes)[0].set_ylabel("cosine similarity")
-    fig.tight_layout()
-    savefig(fig, path)
-
-
-# ------------------------------------------------------------
-# main
+# main (図の描画関数は fncl5_3_fig.py に一本化)
 # ------------------------------------------------------------
 def main() -> None:
     p = argparse.ArgumentParser(
@@ -230,11 +184,20 @@ def main() -> None:
               f"r(readout)={mirror['r_readout']:.4f}  "
               f"r(binary z, 対照)={mirror['r_hidden_binary_z']:.4f}", flush=True)
         if state == "untrained":
+            arrs = {"w1_hat": w1_hat.detach().cpu().numpy(),
+                    "w1_true": w1.detach().cpu().numpy(),
+                    "wout_hat": wout_hat.detach().cpu().numpy(),
+                    "wout_true": wout.detach().cpu().numpy(),
+                    "w1_bin": w1_bin.detach().cpu().numpy()}
+            np.savez(args.out_dir / "fig_data.npz", **arrs)
+            print(f"  saved {args.out_dir / 'fig_data.npz'}")
             plot_mirror_scatter(
-                [("hidden W (corr. with d)", w1_hat, w1, mirror["r_hidden_d"]),
-                 ("readout W", wout_hat, wout, mirror["r_readout"]),
-                 ("hidden W (corr. with binary z)", w1_bin, w1,
-                  mirror["r_hidden_binary_z"])],
+                [("hidden W (corr. with d)", arrs["w1_hat"], arrs["w1_true"],
+                  mirror["r_hidden_d"]),
+                 ("readout W", arrs["wout_hat"], arrs["wout_true"],
+                  mirror["r_readout"]),
+                 ("hidden W (corr. with binary z)", arrs["w1_bin"],
+                  arrs["w1_true"], mirror["r_hidden_binary_z"])],
                 args.out_dir / "fig_mirror_scatter.png")
 
         # (b) 更新方向の忠実度 (draw 平均後に比較)
@@ -258,6 +221,12 @@ def main() -> None:
     results["gradient"] = fid
 
     plot_grad_cosine(fid, args.out_dir / "fig_grad_cosine.png")
+    m0 = results["mirror"]["untrained"]
+    plot_fidelity_composite(
+        [("hidden $W$", arrs["w1_hat"], arrs["w1_true"], m0["r_hidden_d"]),
+         ("readout $W$", arrs["wout_hat"], arrs["wout_true"],
+          m0["r_readout"])],
+        fid, args.out_dir / "fig_fidelity.png")
 
     lines = ["| state | quantity | value |", "|---|---|---|"]
     for state, m in results["mirror"].items():

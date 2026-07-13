@@ -1,174 +1,199 @@
 """
-fncl5_6.py — 論文 §5.6「負の結果 — 外部ノード摂動は二値交差に効かない」
+fncl5_6.py — 論文 §5.6「sin(x) 以外のベンチマークでの一般化」
 
-(a) 手法比較: cov_deriv_kde (基準) に対し、外部摂動ゲート cov_deriv_gate と
-    その antithetic / common-random-number 版 cov_deriv_gate_crn を、摂動強度
-    alpha を掃引して比較する (CRN でも cov_deriv に届かないこと)。
-    注: crn は 1 credit パスあたり forward を 2 回走らせる (+xi / -xi) ので、
-    forward 回数で見ると gate の 2 倍の予算を使っている (それでも届かない)。
+sin(x) 回帰 (§5.2) と同一プロトコル (H=64, T=64, 1500 epoch, 同一初期重み,
+オプティマイザは §5.1 の適合選択) のまま、タスクだけを差し替えて本文 5 手法を
+比較する。現行の学習コード (train_cov) は読み出しがスカラー 1 出力である
+ことを前提とするため、ベンチマークはスカラー出力のものを選ぶ:
 
-(b) 退化のデモ: CRN ペア (+xi, -xi) を RNG 状態リセットで同一ノイズの下で
-    走らせたとき、per-sample 損失差 L(+xi) - L(-xi) が「厳密に 0」になる
-    サンプルの割合を alpha の関数として測る。二値交差のパスワイズ応答が
-    測度ゼロ集合でしか反応しない (= 外部摂動から情報がほとんど取れない)
-    ことの直接の可視化。
+  friedman1 : Friedman #1 回帰 (5 次元入力の古典的ベンチマーク,
+              y = 10 sin(pi x1 x2) + 20 (x3-.5)^2 + 10 x4 + 5 x5 を [-1,1] に正規化)
+  moons     : two moons 二値分類 (2 次元, 目標 ±1 の MSE 学習, accuracy も報告)
+  circles   : 同心円 二値分類 (2 次元, 同上)
+
+データセットは固定 rng (seed 12345) で 1 回だけ生成し、seed 0,1,2 は
+初期重み・学習中のノイズのみを変える (§5.2 と同じ流儀)。
 
 生成物 (out/fncl5_6/):
-  fig_gate_mse_vs_alpha.png -> 図 (MSE vs alpha, gate / crn / cov_deriv 基準線)
-  fig_crn_degeneracy.png    -> 図 (損失差が厳密に 0 のサンプル割合 vs alpha)
-  table_gate.md             -> 数表
-  results.json
+  table_benchmarks.md  -> タスク x 手法の最終 MSE (mean±std) + 分類 accuracy
+  results.json         -> 数値一式
+  curves_preds_<task>.npz -> 学習曲線・予測 (先頭 seed; 図が必要になった場合用)
 
 実行例:
-  python tmp/fncl5_6.py                       # 既定: H=32, T=48, 1000 epochs
-  python tmp/fncl5_6.py --alphas 0.05,0.1,0.3,1.0
-  python tmp/fncl5_6.py --quick
+  python tmp/fncl5_6.py                # 本番 (3 seeds x 3 tasks x 5 手法)
+  python tmp/fncl5_6.py --quick        # 動作確認
 """
+from __future__ import annotations
+
 import argparse
+import copy
+from pathlib import Path
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
-from fncl_common import (add_common_args, finalize_args, make_task,
-                         model_factory, run_method, config_dict,
-                         write_text, save_json, savefig, fncl)
+from fncl_common import (add_common_args, finalize_args, config_dict, run_method,
+                         write_text, save_json)
+import forward_noise_covariance_learning as fncl
+from nnn import model as nnn_model
+
+DATA_SEED = 12345
+N_POINTS = 128
+
+# 本文 §5.1 の 5 手法 (オプティマイザは誤差の性質に適合させた既定の組)
+BENCH_METHODS = [
+    ("backprop",          {"kind": "backprop"}),
+    ("cov_only",          {"method": "cov_only"}),
+    ("cov_deriv_kde",     {"method": "cov_deriv", "slope": "kde"}),
+    ("cov_jac_adam",      {"method": "cov_jac", "opt": "adam", "jac_track": True}),
+    ("cov_jac_full_adam", {"method": "cov_jac_full", "opt": "adam",
+                           "jac_track": True, "jac_out": "cov_m3"}),
+]
 
 
-def crn_zero_fraction(args, alphas, device, block_size: int) -> list:
-    """(b) alpha ごとに、CRN ペアの per-sample 損失差が厳密に 0 の割合を測る.
+# ============================================================
+# タスク生成 (すべてスカラー出力; 入力は ~[-2, 2] に正規化)
+# ============================================================
+def make_friedman1(rng: np.random.Generator):
+    X = rng.uniform(0.0, 1.0, (N_POINTS, 5))
+    y = (10.0 * np.sin(np.pi * X[:, 0] * X[:, 1]) + 20.0 * (X[:, 2] - 0.5) ** 2
+         + 10.0 * X[:, 3] + 5.0 * X[:, 4])
+    x = 4.0 * (X - 0.5)                                   # [-2, 2]
+    y = 2.0 * (y - y.min()) / (y.max() - y.min()) - 1.0   # [-1, 1]
+    return x.astype(np.float32), y.astype(np.float32), "regression"
 
-    摂動はブロックゲート (block_size ユニット/層) に限定する。block_size=1 は
-    パスワイズ退化の最も純粋な単一ユニット版、block_size=gate_block_size は
-    実際の cov_deriv_gate_crn が信号を取り出す条件そのもの。"""
-    torch.manual_seed(args.seed_list[0])
-    np.random.seed(args.seed_list[0])
-    x_raw, target, x, t = make_task(device)
-    net = model_factory(args.noise, args, device)()
-    hidden_sizes = list(net.structure[1:-1])
-    masks = fncl.gate_masks(hidden_sizes, 0, block_size, "cyclic", device)
-    cap = fncl.Capture(net)
-    pert = fncl.Perturber(net, alpha=1.0, mode="crn")
-    fracs = []
-    with torch.no_grad():
-        for a in alphas:
-            # ゲートブロックのみに固定摂動 a*m*xi を注入し, +/- を同一ノイズで評価
-            pert.fixed_p = [
-                a * m.view(1, 1, -1)
-                * torch.randn(x.shape[0], net.t, h, device=device)
-                for m, h in zip(masks, hidden_sizes)]
-            snap = fncl.rng_snapshot(device)
-            pert.sign = +1.0
-            net(x)
-            L_plus = (cap.y_samples.squeeze(-1) - t) ** 2      # [N, T]
-            fncl.rng_restore(snap)                              # 同一ノイズを再現
-            pert.sign = -1.0
-            net(x)
-            L_minus = (cap.y_samples.squeeze(-1) - t) ** 2
-            frac = float((L_plus == L_minus).float().mean())    # 厳密一致の割合
-            fracs.append(frac)
-            print(f"  block={block_size:<3d} alpha={a:<6g} "
-                  f"P[L(+xi) - L(-xi) == 0] = {frac:.4f}", flush=True)
-    cap.remove()
-    pert.remove()
-    return fracs
+
+def make_moons(rng: np.random.Generator, noise: float = 0.10):
+    m = N_POINTS // 2
+    th0 = rng.uniform(0.0, np.pi, m)
+    th1 = rng.uniform(0.0, np.pi, N_POINTS - m)
+    x0 = np.stack([np.cos(th0), np.sin(th0)], axis=1)
+    x1 = np.stack([1.0 - np.cos(th1), 0.5 - np.sin(th1)], axis=1)
+    X = np.concatenate([x0, x1]) + rng.normal(0.0, noise, (N_POINTS, 2))
+    y = np.concatenate([-np.ones(m), np.ones(N_POINTS - m)])
+    X = (X - X.mean(axis=0)) / X.std(axis=0) * 1.2        # ~[-2, 2]
+    return X.astype(np.float32), y.astype(np.float32), "classification"
+
+
+def make_circles(rng: np.random.Generator, noise: float = 0.08):
+    m = N_POINTS // 2
+    th0 = rng.uniform(0.0, 2.0 * np.pi, m)
+    th1 = rng.uniform(0.0, 2.0 * np.pi, N_POINTS - m)
+    x0 = np.stack([np.cos(th0), np.sin(th0)], axis=1)
+    x1 = 0.5 * np.stack([np.cos(th1), np.sin(th1)], axis=1)
+    X = np.concatenate([x0, x1]) + rng.normal(0.0, noise, (N_POINTS, 2))
+    y = np.concatenate([-np.ones(m), np.ones(N_POINTS - m)])
+    X = X * 1.6                                           # ~[-2, 2]
+    return X.astype(np.float32), y.astype(np.float32), "classification"
+
+
+TASKS = {"friedman1": make_friedman1, "moons": make_moons, "circles": make_circles}
+
+
+# ============================================================
+# 多次元入力のモデル (fncl.build_model の 1 次元 bump タイル初期化を使わない版)
+# ============================================================
+def model_factory_nd(noise: str, in_dim: int, args, device: torch.device):
+    structure = [in_dim, args.hidden_dim, args.hidden_dim, 1]
+
+    def build():
+        if noise == "gaussian":
+            net = nnn_model.SimpleNNNSample(structure=structure, std=args.sigma,
+                                            h=args.crossing_h, t=args.num_samples,
+                                            output_bias=True)
+        else:
+            net = nnn_model.SimpleNNNUniformSample(
+                structure=structure, radius=args.radius, center=fncl.UNIFORM_CENTER,
+                h=args.crossing_h, t=args.num_samples, output_bias=True)
+        net.noise_field = [torch.ones(args.hidden_dim, device=device)
+                           for _ in range(len(structure) - 2)]
+        return net.to(device)
+
+    net0 = build()
+    init_state = copy.deepcopy(net0.state_dict())
+
+    def fresh():
+        n = build()
+        n.load_state_dict(init_state)
+        return n
+
+    return fresh
+
+
+# ============================================================
+# 実行・集計
+# ============================================================
+def accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+    return float(np.mean(np.sign(pred) == np.sign(target)))
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="§5.6 negative result: external node perturbation "
-                    "(incl. CRN) fails on the binary crossing.")
-    # doc §8.3 のレジーム (CPU で回る予算) を既定にする
-    add_common_args(p, epochs=1000, hidden_dim=32, num_samples=48, seeds="0")
+        description="§5.6 generalization: 5 methods on simple benchmarks "
+                    "beyond sin(x).")
+    add_common_args(p)
     p.add_argument("--noise", choices=("gaussian", "uniform"), default="gaussian")
-    p.add_argument("--alphas", type=str, default="0.05,0.1,0.3,1.0",
-                   help="摂動強度 alpha の掃引 (カンマ区切り)")
-    p.add_argument("--gate-block-size", type=int, default=8)
+    p.add_argument("--tasks", type=str, default=",".join(TASKS),
+                   help="カンマ区切りタスク名")
     args = finalize_args(p.parse_args(), default_out="out/fncl5_6")
-    alphas = [float(a) for a in args.alphas.split(",") if a.strip() != ""]
-    if args.quick:
-        alphas = alphas[:2]
-
     device = torch.device(args.device)
-    x_raw, target, x, t = make_task(device)
-    seed = args.seed_list[0]
     log_every = max(1, args.epochs // 5)
-    results = {"config": config_dict(args), "alphas": alphas, "mse": {}}
 
-    # --- (a) 手法比較: 基準 cov_deriv_kde + alpha 掃引の gate / crn ---
-    def run(name, spec):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        fresh = model_factory(args.noise, args, device)
-        losses, pred, _ = run_method(spec, fresh, x, t, args.noise, args,
-                                     log_every)
-        mse = float(np.mean((pred - target) ** 2))
-        results["mse"][name] = mse
-        print(f"{name:28s} final MSE = {mse:.5f}", flush=True)
-        return mse
+    results = {}         # results[task][method][seed] = {"mse": ..., "acc": ...}
+    for task_name in args.tasks.split(","):
+        x_np, t_np, kind = TASKS[task_name](np.random.default_rng(DATA_SEED))
+        x = torch.tensor(x_np, device=device)
+        t = torch.tensor(t_np, device=device).unsqueeze(1)
+        results[task_name] = {"kind": kind, "per_method": {}}
+        curves, preds = {}, {}
+        for seed in args.seed_list:
+            for name, spec in BENCH_METHODS:
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+                fresh = model_factory_nd(args.noise, x_np.shape[1], args, device)
+                losses, pred, _ = run_method(spec, fresh, x, t, args.noise, args,
+                                             log_every)
+                entry = {"mse": float(np.mean((pred - t_np) ** 2))}
+                if kind == "classification":
+                    entry["acc"] = accuracy(pred, t_np)
+                results[task_name]["per_method"].setdefault(name, {})[seed] = entry
+                extra = (f"  acc = {entry['acc']:.3f}"
+                         if kind == "classification" else "")
+                print(f"[{task_name} | seed {seed}] {name:20s} "
+                      f"final MSE = {entry['mse']:.5f}{extra}", flush=True)
+                if seed == args.seed_list[0]:
+                    curves[name] = losses
+                    preds[name] = pred
+        np.savez(args.out_dir / f"curves_preds_{task_name}.npz",
+                 x=x_np, target=t_np,
+                 **{f"curve_{k}": np.asarray(v) for k, v in curves.items()},
+                 **{f"pred_{k}": np.asarray(v) for k, v in preds.items()})
+        print(f"  saved {args.out_dir / f'curves_preds_{task_name}.npz'}")
 
-    base = run("cov_deriv_kde", {"method": "cov_deriv", "slope": "kde"})
-    gate_mse, crn_mse = [], []
-    for a in alphas:
-        gate_mse.append(run(f"cov_deriv_gate/alpha={a}",
-                            {"method": "cov_deriv_gate", "gate_alpha": a,
-                             "gate_block_size": args.gate_block_size,
-                             "gate_mode": "cyclic"}))
-        crn_mse.append(run(f"cov_deriv_gate_crn/alpha={a}",
-                           {"method": "cov_deriv_gate_crn", "gate_alpha": a,
-                            "gate_block_size": args.gate_block_size,
-                            "gate_mode": "cyclic"}))
-
-    fig = plt.figure(figsize=(7, 5))
-    plt.axhline(base, color="k", ls="--", lw=1.2,
-                label=f"cov_deriv_kde (baseline, {base:.3f})")
-    plt.plot(alphas, gate_mse, "o-", label="cov_deriv_gate")
-    plt.plot(alphas, crn_mse, "s-", label="cov_deriv_gate_crn (2x forwards)")
-    plt.xscale("log")
-    plt.yscale("log")
-    plt.xlabel("perturbation strength alpha")
-    plt.ylabel("final MSE (log)")
-    plt.title("External node perturbation fails on the binary crossing")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    fig.tight_layout()
-    savefig(fig, args.out_dir / "fig_gate_mse_vs_alpha.png")
-
-    # --- (b) CRN 退化のデモ (単一ユニット / 手法と同じブロック) ---
-    print("\n[degeneracy] fraction of exactly-zero loss differences:",
-          flush=True)
-    fracs_1 = crn_zero_fraction(args, alphas, device, block_size=1)
-    fracs_b = crn_zero_fraction(args, alphas, device,
-                                block_size=args.gate_block_size)
-    results["crn_zero_fraction"] = {
-        "block_1": dict(zip(map(str, alphas), fracs_1)),
-        f"block_{args.gate_block_size}": dict(zip(map(str, alphas), fracs_b)),
-    }
-    fig = plt.figure(figsize=(6.5, 4.5))
-    plt.plot(alphas, fracs_1, "o-", label="single perturbed unit per layer")
-    plt.plot(alphas, fracs_b, "s-",
-             label=f"block of {args.gate_block_size} (as in the method)")
-    plt.xscale("log")
-    plt.ylim(0.0, 1.05)
-    plt.xlabel("perturbation strength alpha")
-    plt.ylabel("P[ L(+xi) - L(-xi) == 0 ]  (exact)")
-    plt.title("Pathwise degeneracy of the binary crossing under CRN pairs")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    fig.tight_layout()
-    savefig(fig, args.out_dir / "fig_crn_degeneracy.png")
-
-    lines = ["| run | final MSE |", "|---|---|"]
-    for k, v in results["mse"].items():
-        lines.append(f"| {k} | {v:.5f} |")
-    lines.append("")
-    lines.append("| alpha | P[dL == 0] (block=1) | "
-                 f"P[dL == 0] (block={args.gate_block_size}) |")
-    lines.append("|---|---|---|")
-    for a, f1, fb in zip(alphas, fracs_1, fracs_b):
-        lines.append(f"| {a} | {f1:.4f} | {fb:.4f} |")
-    write_text(args.out_dir / "table_gate.md", "\n".join(lines) + "\n")
-    save_json(args.out_dir / "results.json", results)
+    # ---- summary table: rows = methods, cols = tasks (MSE mean±std [, acc]) ----
+    lines = [f"**Final MSE (mean ± std over seeds {args.seeds}), noise={args.noise}, "
+             f"H={args.hidden_dim}, T={args.num_samples}, epochs={args.epochs}, "
+             f"lr={args.lr}** (分類タスクは括弧内に accuracy)", ""]
+    task_names = list(results.keys())
+    lines.append("| 手法 | " + " | ".join(task_names) + " |")
+    lines.append("|---" * (len(task_names) + 1) + "|")
+    for name, _ in BENCH_METHODS:
+        cells = []
+        for tn in task_names:
+            per_seed = results[tn]["per_method"][name]
+            mses = [per_seed[s]["mse"] for s in args.seed_list]
+            cell = f"{np.mean(mses):.5f} ± {np.std(mses):.5f}"
+            if results[tn]["kind"] == "classification":
+                accs = [per_seed[s]["acc"] for s in args.seed_list]
+                cell += f" ({np.mean(accs):.3f})"
+            cells.append(cell)
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    table = "\n".join(lines) + "\n"
+    print("\n" + table)
+    write_text(args.out_dir / "table_benchmarks.md", table)
+    save_json(args.out_dir / "results.json",
+              {"config": config_dict(args), "noise": args.noise,
+               "data_seed": DATA_SEED, "results": results})
 
 
 if __name__ == "__main__":

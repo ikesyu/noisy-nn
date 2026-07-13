@@ -106,9 +106,9 @@ def model_factory(noise: str, args: argparse.Namespace, device: torch.device,
 # 実験行列
 # ============================================================
 # 検証セット (論文 §5.1): 8 手法。cov_jac 系は --jac-track 相当 ON。
-# cov_jac_full は読み出し誤差も共分散から推定する変種 (§4.6/§5.7);
+# cov_jac_full は読み出し誤差も共分散から推定する変種 (§4.4/§5.5);
 # 既定の jac_out="cov_m3" は歪度バイアスの 3 次モーメント補正 (raw の "cov" は
-# Adam でドリフトする — その掃引は fncl5_7.py が担当)。
+# Adam でドリフトする — その掃引は fncl5_5.py が担当)。
 VERIFICATION_METHODS = [
     ("backprop",           {"kind": "backprop"}),
     ("cov_only",           {"method": "cov_only"}),
@@ -206,9 +206,12 @@ def save_json(path: Path, obj) -> None:
 
 
 def savefig(fig, path: Path) -> None:
+    """PNG (確認用) と PDF (論文用) を常に併せて保存する."""
+    path = Path(path)
     fig.savefig(path, dpi=150)
+    fig.savefig(path.with_suffix(".pdf"))
     plt.close(fig)
-    print(f"  saved {path}")
+    print(f"  saved {path} (+ .pdf)")
 
 
 def bar_mse(mse: dict, seed_list, title: str, path: Path) -> None:
@@ -260,6 +263,10 @@ def run_verification(noise: str, args) -> dict:
     write_text(out / "table_final_mse.md", table)
     save_json(out / "results.json",
               {"config": config_dict(args), "noise": noise, "final_mse": mse})
+    np.savez(out / "curves_preds.npz", x_raw=x_raw, target=target,
+             **{f"curve_{k}": np.asarray(v) for k, v in curves.items()},
+             **{f"pred_{k}": np.asarray(v) for k, v in preds.items()})
+    print(f"  saved {out / 'curves_preds.npz'}")
     savefig(fncl.plot_losses(curves), out / "fig_learning_curves.png")
     savefig(fncl.plot_predictions(x_raw, target, preds),
             out / "fig_predictions.png")

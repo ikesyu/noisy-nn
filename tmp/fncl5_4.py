@@ -22,8 +22,8 @@ fncl5_4.py — 論文 §5.4「アブレーション」(Fig.6)
 import argparse
 
 from fncl_common import (add_common_args, finalize_args, run_matrix,
-                         mse_table_md, bar_mse, write_text, save_json,
-                         config_dict)
+                         mse_table_md, write_text, save_json, config_dict)
+from fncl5_4_fig import plot_ablation
 
 ABLATION_METHODS = [
     # 参照
@@ -69,8 +69,7 @@ def main() -> None:
     write_text(args.out_dir / "table_ablation.md", table)
     save_json(args.out_dir / "results.json",
               {"config": config_dict(args), "final_mse": mse})
-    bar_mse(mse, args.seed_list, "Ablations (final MSE)",
-            args.out_dir / "fig_ablation_bar.png")
+    plot_ablation(mse, args.seed_list, args.out_dir / "fig_ablation_bar.png")
 
 
 if __name__ == "__main__":
