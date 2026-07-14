@@ -13,18 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# 共通基盤 (fncl_common) は data_nce/ にある。
-DATA_DIR = Path(__file__).resolve().parents[1] / "data_nce"
-if str(DATA_DIR) not in sys.path:
-    sys.path.append(str(DATA_DIR))
-from fncl_common import savefig  # noqa: E402
+# 実装は tmp/fncl_lib_tmp.py (data_nce/fncl/ の自己完結コピー) を使う。
+from fncl_lib_tmp import savefig  # noqa: E402
 
 
 def fig_gate_mse_vs_alpha(alphas, base, gate_mse, crn_mse, path) -> None:

@@ -1,9 +1,9 @@
 """forward_noise_covariance_learning.py — 全手法比較の PoC ランナー (CLI).
 
-論文の学習則の実装本体は data_nce/fncl/ パッケージにある。このスクリプトは
-backprop / cov_only / cov_deriv / cov_jac / cov_jac_full (+ gate 変種) を
-sin(x) 回帰で一括比較する対話的なランナーで、論文の図表生成
-(data_nce/fncl5_*.py, data_nce/fncl6_*.py) からは独立している。
+実装は tmp/fncl_lib_tmp.py (data_nce/fncl/ の自己完結コピー) を使う。
+このスクリプトは backprop / cov_only / cov_deriv / cov_jac / cov_jac_full
+(+ gate 変種) を sin(x) 回帰で一括比較する対話的なランナーで、論文の図表生成
+(data_nce/) からは独立している。
 
 Run
 ---
@@ -19,21 +19,14 @@ from __future__ import annotations
 
 import argparse
 import copy
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# 実装本体の fncl パッケージ (data_nce/) を import パスに追加する。
-DATA_DIR = Path(__file__).resolve().parents[1] / "data_nce"
-if str(DATA_DIR) not in sys.path:
-    sys.path.append(str(DATA_DIR))
-from fncl import (NUM_POINTS, build_model, predict, train_backprop,  # noqa: E402
-                  train_cov)
-from fncl.viz import (plot_activity_stats, plot_fit_check, plot_losses,  # noqa: E402
-                      plot_predictions)
+from fncl_lib_tmp import (NUM_POINTS, build_model, predict, train_backprop,
+                          train_cov, plot_activity_stats, plot_fit_check,
+                          plot_losses, plot_predictions)
 
 
 # ============================================================
