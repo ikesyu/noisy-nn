@@ -11,18 +11,18 @@ fncl5_4.py — 論文 §5.4「アブレーション」(Fig.6)
 
 生成物 (out/fncl5_4/):
   fig_ablation_bar.png   -> Fig.6 (最終 MSE 棒グラフ, log, seed 誤差棒)
-  table_ablation.md      -> 数表
+  (標準出力)             -> 数表
   results.json
 
 実行例:
-  python tmp/fncl5_4.py
-  python tmp/fncl5_4.py --seeds 0,1,2,3,4
-  python tmp/fncl5_4.py --quick
+  python data_nce/fncl5_4.py
+  python data_nce/fncl5_4.py --seeds 0,1,2,3,4
+  python data_nce/fncl5_4.py --quick
 """
 import argparse
 
 from fncl_common import (add_common_args, finalize_args, run_matrix,
-                         mse_table_md, write_text, save_json, config_dict)
+                         mse_table_md, save_json, config_dict)
 from fncl5_4_fig import plot_ablation
 
 ABLATION_METHODS = [
@@ -65,8 +65,7 @@ def main() -> None:
     caption = (f"Ablations, noise={args.noise}, H={args.hidden_dim}, "
                f"T={args.num_samples}, epochs={args.epochs}")
     table = mse_table_md(mse, args.seed_list, caption)
-    print("\n" + table)
-    write_text(args.out_dir / "table_ablation.md", table)
+    print("\n" + table)                     # 表は標準出力のみ (ファイル保存しない)
     save_json(args.out_dir / "results.json",
               {"config": config_dict(args), "final_mse": mse})
     plot_ablation(mse, args.seed_list, args.out_dir / "fig_ablation_bar.png")

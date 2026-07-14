@@ -23,13 +23,13 @@ fncl5_5.py — 論文 §5.5「読み出し誤差の共分散推定の実証」
 生成物 (out/fncl5_5/):
   fig_readout_drift.png  -> 図 (学習曲線: raw のドリフト vs m3/probe の安定, log MSE)
   fig_bias_scatter.png   -> 図 (観測バイアス vs m3/Var の入力別散布図, 相関つき)
-  table_readout.md       -> 数表 (seed 別最終 MSE)
+  (標準出力)             -> 数表 (seed 別最終 MSE)
   results.json
 
 実行例:
-  python tmp/fncl5_5.py                # 既定: H=64, T=64, 1500 epochs, seeds 0,1,2
-  python tmp/fncl5_5.py --no-include-sgd
-  python tmp/fncl5_5.py --quick
+  python data_nce/fncl5_5.py                # 既定: H=64, T=64, 1500 epochs, seeds 0,1,2
+  python data_nce/fncl5_5.py --no-include-sgd
+  python data_nce/fncl5_5.py --quick
 """
 import argparse
 
@@ -38,7 +38,7 @@ import torch
 
 from fncl_common import (add_common_args, finalize_args, make_task,
                          model_factory, run_matrix, mse_table_md, config_dict,
-                         write_text, save_json, fncl)
+                         save_json, fncl)
 from fncl5_5_fig import fig_drift, fig_bias_scatter, plot_readout_composite
 
 
@@ -148,8 +148,7 @@ def main() -> None:
                f"H={args.hidden_dim}, T={args.num_samples}, "
                f"epochs={args.epochs}, lr={args.lr} (Adam rows)")
     table = mse_table_md(mse, args.seed_list, caption)
-    print("\n" + table)
-    write_text(out / "table_readout.md", table)
+    print("\n" + table)                     # 表は標準出力のみ (ファイル保存しない)
     fig_drift(curves, out / "fig_readout_drift.png")
 
     # ---- (b) 歪度バイアスの直接検証 ----

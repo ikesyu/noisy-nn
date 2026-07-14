@@ -8,7 +8,7 @@ fncl5_5.py 本体が保存する fig_data.npz (学習曲線・バイアス検証
 を描き直す。描画関数は fncl5_5.py 本体からも import される (図の単一定義)。
 
 実行例:
-  python tmp/fncl5_5_fig.py                # 既定: --data out/fncl5_5
+  python data_nce/fncl5_5_fig.py                # 既定: --data out/fncl5_5
 """
 from __future__ import annotations
 

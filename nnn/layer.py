@@ -1,3 +1,9 @@
+"""Layers of the NNN: noise injection, sampling, readout, and crossing activations.
+
+Each `*CrossingLayer` combines a noise source with the corresponding crossing
+activation from `nnn.activation`. Tensor shapes follow the convention
+[N, D] (per input) or [N, T, D] (T stochastic samples per input).
+"""
 import torch
 import torch.nn as nn
 
@@ -6,32 +12,17 @@ from . import activation
 
 
 class GaussianNoiseLayer(nn.Module):
-    """Applies Gaussian noise to an input tensor.
+    """Adds Gaussian noise N(mean, std^2) to the input.
 
-    This layer generates Gaussian noise with the specified mean and standard deviation 
-    and adds it element-wise to the input tensor.
-
-    Args:
-        mean (float, optional): The mean of the Gaussian noise. Defaults to `0.0`.
-        std (float, optional): The standard deviation of the Gaussian noise. Defaults to `1.0`.
+    `mean` / `std` given to `forward` override and replace the stored values.
     """
 
     def __init__(self, mean=0.0, std=1.0):
-        super(GaussianNoiseLayer, self).__init__()
+        super().__init__()
         self.mean = mean
         self.std = std
 
     def forward(self, x: torch.Tensor, mean: float = None, std: float = None) -> torch.Tensor:
-        """Applies Gaussian noise to the input tensor.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            mean (float, optional): Override the mean value for noise generation.
-            std (float, optional): Override the standard deviation for noise generation.
-
-        Returns:
-            torch.Tensor: The input tensor with added Gaussian noise.
-        """
         if mean is not None:
             self.mean = mean
         if std is not None:
@@ -41,120 +32,68 @@ class GaussianNoiseLayer(nn.Module):
 
 
 class SampleLayer(nn.Module):
-    """Expands the input tensor along a new temporal dimension and duplicates it.
-
-    This layer transforms an input tensor of shape `[N, D]` into `[N, T, D]`
-    by adding a new dimension and repeating the input `T` times.
-
-    Args:
-        numT (int, optional): The number of times to duplicate the input along the new dimension. Defaults to `10`.
-    """
+    """Expands [N, D] to [N, T, D] by repeating the input T (= numT) times."""
 
     def __init__(self, numT=10):
-        super(SampleLayer, self).__init__()
+        super().__init__()
         self.numT = numT
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Expands and duplicates the input tensor along a new temporal dimension.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape `[N, D]`.
-
-        Returns:
-            torch.Tensor: Transformed tensor of shape `[N, T, D]`.
-        """
         return x.unsqueeze(1).repeat(1, self.numT, 1)
 
 
 class EnsembleMeanLayer(nn.Module):
-    """Computes the mean along the temporal dimension of an input tensor.
-
-    This layer takes an input tensor of shape `[N, T, D]` and computes the mean 
-    along the T dimension, resulting in an output of shape `[N, D]`.
-    """
+    """Reduces [N, T, D] to [N, D] by averaging over the T dimension."""
 
     def __init__(self):
-        super(EnsembleMeanLayer, self).__init__()
+        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Computes the mean along the temporal dimension.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape `[N, T, D]`.
-
-        Returns:
-            torch.Tensor: Output tensor of shape `[N, D]`, which is the mean along the T dimension.
-        """
         return torch.mean(x, dim=1)
 
 
 class FilterLayer(nn.Module):
-    """ Computes the moving average along the temporal dimention of an input tensor.
-    
-    This layer takes an input tensor of shape `[N, T]` and applies the moving average
-    along the T dimension, resulting in an output of shape `[N, T]`.
-    Its backward is identical to the forward.
+    """Circular moving average of window `w` along the T dimension of [N, T].
 
-    Args:
-        w: window size
+    Implemented as a fixed (non-trainable) uniform Conv1d kernel, so the
+    backward pass is the same moving average.
     """
+
     def __init__(self, w: int):
-        super(FilterLayer, self).__init__()
+        super().__init__()
         if not isinstance(w, int) or w <= 0:
-            raise ValueError("D must be a positive int.")
+            raise ValueError("w must be a positive int.")
         self.w = w
 
-        self.conv = nn.Conv1d(1, 1, w, stride=1, padding=w//2,
+        self.conv = nn.Conv1d(1, 1, w, stride=1, padding=w // 2,
                               bias=False, padding_mode="circular")
         with torch.no_grad():
-            self.conv.weight.fill_(1.0 / w)  # uniform kernel
-        self.conv.weight.requires_grad_(False)  # fixing the kernel
-        
+            self.conv.weight.fill_(1.0 / w)
+        self.conv.weight.requires_grad_(False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Applies the uniform kernel to take moving average.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after applying the filter. Its shape is not changed.
-        """
         if x.dim() != 2:
             raise ValueError("Input must be [N, T].")
-        y = self.conv(x.unsqueeze(1)).squeeze(1) # add a dummy channel for conv1d and recover afterwards
-        if self.w % 2 == 0: #if w is even
-            y = y[:, :x.size(1)] # remove unnecessary element at the end
+        # add a dummy channel for Conv1d and remove it afterwards
+        y = self.conv(x.unsqueeze(1)).squeeze(1)
+        if self.w % 2 == 0:
+            y = y[:, :x.size(1)]    # even w: drop the extra trailing element
         return y
 
 
 class GaussianCrossingLayer(nn.Module):
-    """Applies the Crossing activation function (realtime) with Gaussian noise.
+    """Gaussian noise + `Crossing` (realtime version, [N, T]).
 
-    This layer generates Gaussian noise with the given standard deviation and applies 
-    the Crossing activation function. The noise can be adjusted dynamically.
-
-    Args:
-        std (float, optional): Standard deviation of the Gaussian noise. Defaults to `0.5`.
-        h (float, optional): Threshold parameter for the Crossing activation function. Defaults to `0.2`.
+    An `std` given to `forward` overrides and replaces the stored value.
     """
 
     def __init__(self, std=0.5, h=0.2):
-        super(GaussianCrossingLayer, self).__init__()
+        super().__init__()
         self.h = h
         self.std = std
         self.noise_layer = GaussianNoiseLayer(std=self.std)
 
     def forward(self, x: torch.Tensor, std: float = None) -> torch.Tensor:
-        """Applies Gaussian noise and the Crossing activation function.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            std (float, optional): Override the standard deviation for noise generation.
-
-        Returns:
-            torch.Tensor: Output tensor after applying noise and the Crossing activation function.
-        """
         if std is not None:
             self.std = std
         x = self.noise_layer(x, std=self.std)
@@ -162,32 +101,18 @@ class GaussianCrossingLayer(nn.Module):
 
 
 class GaussianCrossingSampleLayer(nn.Module):
-    """Applies the Crossing activation function (sampling version) with Gaussian noise.
+    """Gaussian noise + `CrossingSample` (sampling version, [N, T, D]).
 
-    This layer generates Gaussian noise with the given standard deviation and applies 
-    the Crossing activation function. The noise can be adjusted dynamically.
-
-    Args:
-        std (float, optional): Standard deviation of the Gaussian noise. Defaults to `0.5`.
-        h (float, optional): Threshold parameter for the Crossing activation function. Defaults to `0.2`.
+    An `std` given to `forward` overrides and replaces the stored value.
     """
 
     def __init__(self, std=0.5, h=0.2):
-        super(GaussianCrossingSampleLayer, self).__init__()
+        super().__init__()
         self.h = h
         self.std = std
         self.noise_layer = GaussianNoiseLayer(std=self.std)
 
     def forward(self, x: torch.Tensor, std: float = None) -> torch.Tensor:
-        """Applies Gaussian noise and the Crossing activation function.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            std (float, optional): Override the standard deviation for noise generation.
-
-        Returns:
-            torch.Tensor: Output tensor after applying noise and the Crossing activation function.
-        """
         if std is not None:
             self.std = std
         x = self.noise_layer(x, std=self.std)
@@ -195,33 +120,19 @@ class GaussianCrossingSampleLayer(nn.Module):
 
 
 class GaussianCrossingStatisticLayer(nn.Module):
-    """Applies the statistical version of the Crossing activation function with Gaussian noise.
+    """Gaussian noise + `CrossingStatistic` (statistic version, [N, D]).
 
-    This layer generates Gaussian noise samples, applies the Crossing activation function,
-    and estimates statistical properties.
-
-    Args:
-        std (float, optional): Standard deviation of the Gaussian noise. Defaults to `0.5`.
-        h (float, optional): Threshold parameter for the Crossing activation function. Defaults to `0.2`.
-        numT (int, optional): Number of samples for statistical estimation. Defaults to `100`.
+    Draws `numT` noise samples internally and returns the sample mean of the
+    crossing response.
     """
 
     def __init__(self, std=0.5, h=0.2, numT=100):
-        super(GaussianCrossingStatisticLayer, self).__init__()
+        super().__init__()
         self.h = h
         self.std = std
         self.numT = numT
 
     def forward(self, x: torch.Tensor, std: float = None) -> torch.Tensor:
-        """Applies Gaussian noise and the statistical version of the Crossing activation function.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            std (float, optional): Override the standard deviation for noise generation.
-
-        Returns:
-            torch.Tensor: Output tensor after applying statistical noise processing and the Crossing activation function.
-        """
         if std is not None:
             self.std = std
         noise_values = noise.gaussian_noise_like(0.0, self.std)
@@ -229,55 +140,34 @@ class GaussianCrossingStatisticLayer(nn.Module):
 
 
 class GaussianCrossingAnalyticLayer(nn.Module):
-    """Applies the analytic version of the Crossing activation function with Gaussian noise.
+    """`CrossingAnalytic` with the Gaussian PDF/CDF ([N, D]).
 
-    This layer analytically computes the expected output using the probability density function (PDF) 
-    and cumulative density function (CDF) of Gaussian noise.
-
-    Args:
-        std (float, optional): Standard deviation of the Gaussian noise. Defaults to `0.5`.
+    Computes the expected crossing response in closed form; no sampling.
     """
 
     def __init__(self, std=0.5):
-        super(GaussianCrossingAnalyticLayer, self).__init__()
+        super().__init__()
         self.std = std
 
     def forward(self, x: torch.Tensor, std: float = None) -> torch.Tensor:
-        """Applies the analytic version of the Crossing activation function.
-
-        The function uses the probability density function (PDF) and cumulative density function (CDF)
-        of Gaussian noise to compute the expected output.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            std (float, optional): Override the standard deviation for noise generation.
-
-        Returns:
-            torch.Tensor: Output tensor after applying the analytic Crossing activation function.
-        """
         if std is not None:
             self.std = std
         pdf = noise.gaussian_pdf_torch(0.0, self.std)
         cdf = noise.gaussian_cdf_torch(0.0, self.std)
         return activation.CrossingAnalytic.apply(x, pdf, cdf)
-        
 
-# =========================================================
-# Compact-support, analytical, hardware-oriented layers
-# =========================================================
+
 class ParabolicCrossingAnalyticLayer(nn.Module):
-    """Analytical crossing layer for bounded uniform noise.
+    """`ParabolicCrossingAnalytic` (analytic response of bounded uniform noise).
 
-    The forward response is
-        0.5 * [1 - ((x - center) / radius)^2]_+.
-
-    The `recruitment` argument is a transparent noise-field intensity in [0, 1].
-    It is mapped to `radius = max_radius * recruitment`. Thus recruitment=0 makes
-    the unit completely inactive, matching the role of zero noise in the original NNN.
+    `recruitment` is a noise-field intensity in [0, 1], mapped to
+    radius = max_radius * recruitment; recruitment = 0 makes the unit
+    completely inactive, matching the role of zero noise in the NNN.
+    An explicit `radius` given to `forward` overrides the recruitment.
     """
 
     def __init__(self, recruitment=1.0, center=0.0, max_radius=1.0, epsilon=1e-10):
-        super(ParabolicCrossingAnalyticLayer, self).__init__()
+        super().__init__()
         self.recruitment = recruitment
         self.center = center
         self.max_radius = max_radius
@@ -294,20 +184,15 @@ class ParabolicCrossingAnalyticLayer(nn.Module):
 
 
 class HatApproxCrossingAnalyticLayer(nn.Module):
-    """Hardware-oriented hat approximation layer.
+    """`HatApproxCrossingAnalytic` (piecewise-linear hardware-oriented response).
 
-    Normalized mode:
-        0.5 * [1 - |x - center| / radius]_+.
-
-    Coupled mode:
-        [radius - |x - center|]_+.
-
-    The `recruitment` argument is mapped to `radius = max_radius * recruitment`.
-    This makes the same noise-field vector usable as a neuron-recruitment vector.
+    `recruitment` is mapped to radius = max_radius * recruitment, so the same
+    noise-field vector can be used as a neuron-recruitment vector. See the
+    activation for the normalized/coupled modes.
     """
 
     def __init__(self, recruitment=1.0, center=0.0, max_radius=1.0, normalized=True, epsilon=1e-10):
-        super(HatApproxCrossingAnalyticLayer, self).__init__()
+        super().__init__()
         self.recruitment = recruitment
         self.center = center
         self.max_radius = max_radius
@@ -325,50 +210,33 @@ class HatApproxCrossingAnalyticLayer(nn.Module):
 
 
 class UniformCrossingSampleLayer(nn.Module):
-    """Applies the Crossing activation function (sampling version) with bounded uniform noise.
+    """Bounded uniform noise + `CrossingSample` ([N, T, D]).
 
-    Noise is drawn from Uniform(center - radius, center + radius).  Taking the
-    expectation over samples recovers the exact parabolic analytical response:
-
-        E[z] = 0.5 * [1 - ((x - center) / radius)^2]_+
-
-    so this layer is the Monte-Carlo counterpart of ParabolicCrossingAnalyticLayer.
-    Operates on tensors of shape [N, T, D].
-
-    Args:
-        radius (float): Half-width of the uniform noise distribution. Defaults to 1.0.
-        center (float): Center of the uniform noise distribution. Defaults to 0.0.
-        h (float): Threshold parameter for the Crossing activation function. Defaults to 0.1.
+    Noise is drawn from Uniform(center - radius, center + radius); the
+    expectation over samples recovers the exact parabolic analytic response,
+    so this layer is the Monte-Carlo counterpart of
+    `ParabolicCrossingAnalyticLayer`. A `radius` given to `forward` applies to
+    that call only.
     """
 
     def __init__(self, radius: float = 1.0, center: float = 0.0, h: float = 0.1):
-        super(UniformCrossingSampleLayer, self).__init__()
+        super().__init__()
         self.radius = radius
         self.center = center
         self.h = h
 
     def forward(self, x: torch.Tensor, radius: float = None) -> torch.Tensor:
-        """Applies bounded uniform noise and the Crossing activation function.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [N, T, D].
-            radius (float, optional): Override the noise half-width for this call.
-
-        Returns:
-            torch.Tensor: Output tensor of the same shape.
-        """
         r = radius if radius is not None else self.radius
         noise_gen = noise.uniform_noise_like(center=self.center, radius=r)
         return activation.CrossingSample.apply(x + noise_gen(x), self.h)
 
 
 # =========================================================
-# Simple check
-# Run `python -m nnn.layer` from outside the nnn directory.
+# Simple check: run `python -m nnn.layer` from the repository root.
 # =========================================================
 if __name__ == "__main__":
-    x = torch.rand(3, 5, 4) # Dummy data (N=3, T=5, D=4)
-    w = torch.rand(3, 10) # Dummy data (N=3, T=10)
+    x = torch.rand(3, 5, 4)     # [N, T, D]
+    w = torch.rand(3, 10)       # [N, T]
     print("Input tensor shape:", x.shape)
 
     noise_layer = GaussianNoiseLayer(std=10.0)

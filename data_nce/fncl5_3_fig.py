@@ -10,7 +10,7 @@ fncl5_3.py 本体が保存する
 描画関数は fncl5_3.py 本体からも import される (図の単一定義)。
 
 実行例:
-  python tmp/fncl5_3_fig.py                # 既定: --data out/fncl5_3
+  python data_nce/fncl5_3_fig.py                # 既定: --data out/fncl5_3
 """
 from __future__ import annotations
 

@@ -7,11 +7,11 @@ plot_crossing_figure.py — 論文用の交差活性図 (examples/plot_crossing.
 を、代表の 1 本の曲線だけで描く。軸・曲線を太くし、目盛り数字・凡例・
 グリッド・枠線といった余計な要素をすべて省いた、論文掲載用の図を出力する。
 
-生成物 (tmp/out/crossing/):
+生成物 (out/crossing/):
   fig_crossing.png / .pdf
 
 実行例:
-  python tmp/plot_crossing_figure.py            # tmp/ から実行
+  python tmp/plot_crossing_figure.py            # プロジェクトルートから実行
   python tmp/plot_crossing_figure.py --sigma 1.0
 """
 from __future__ import annotations

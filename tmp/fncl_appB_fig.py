@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+# 共通基盤 (fncl_common) は data_nce/ にある。
+DATA_DIR = Path(__file__).resolve().parents[1] / "data_nce"
+if str(DATA_DIR) not in sys.path:
+    sys.path.append(str(DATA_DIR))
 from fncl_common import savefig  # noqa: E402
 
 

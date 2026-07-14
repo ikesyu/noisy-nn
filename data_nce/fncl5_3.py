@@ -15,13 +15,13 @@ fncl5_3.py — 論文 §5.3「勾配の不偏性の直接検証」(Fig.5)
 生成物 (out/fncl5_3/):
   fig_mirror_scatter.png  -> Fig.5a (W_hat vs W 散布図 x3: d 相関 / readout / 二値対照)
   fig_grad_cosine.png     -> Fig.5b (層別 cosine, cov_jac vs cov_deriv, 2 状態)
-  table_fidelity.md       -> 数表 (r / cosine / ratio)
+  (標準出力)              -> 数表 (r / cosine / ratio)
   results.json
 
 実行例:
-  python tmp/fncl5_3.py
-  python tmp/fncl5_3.py --grad-draws 128 --mirror-passes 16
-  python tmp/fncl5_3.py --quick
+  python data_nce/fncl5_3.py
+  python data_nce/fncl5_3.py --grad-draws 128 --mirror-passes 16
+  python data_nce/fncl5_3.py --quick
 """
 import argparse
 
@@ -30,7 +30,7 @@ import torch
 
 from fncl_common import (add_common_args, finalize_args, make_task,
                          model_factory, config_dict, pearson, cosine,
-                         norm_ratio, write_text, save_json, fncl)
+                         norm_ratio, save_json, fncl)
 from fncl5_3_fig import (plot_mirror_scatter, plot_grad_cosine,
                          plot_fidelity_composite)
 
@@ -238,7 +238,7 @@ def main() -> None:
                 c = fid[state][est][layer]
                 lines.append(f"| {state} | {est} {layer} cosine (ratio) | "
                              f"{c['cos']:.4f} ({c['ratio']:.2f}) |")
-    write_text(args.out_dir / "table_fidelity.md", "\n".join(lines) + "\n")
+    print("\n" + "\n".join(lines) + "\n")   # 表は標準出力のみ (ファイル保存しない)
     save_json(args.out_dir / "results.json", results)
 
 

@@ -2,10 +2,10 @@
 fncl_common.py — NCE 論文ドラフト (docs/nce_draft.md) §5 以降の実験スクリプト
 (fncl5_*.py, fncl6_*.py) の共通基盤.
 
-既存の tmp/forward_noise_covariance_learning.py (以下 fncl モジュール) の
-モデル構築・学習ルーチンをそのまま再利用し、ここでは
+fncl パッケージ (data_nce/fncl/) のモデル構築・学習ルーチンをそのまま再利用し、
+ここでは
   - 実験行列 (seed × 手法) の実行,
-  - 最終 MSE 表 (markdown) / results.json の保存,
+  - 最終 MSE 表の標準出力への表示と results.json の保存,
   - 図 (PNG) の保存 (ヘッドレス, Agg バックエンド)
 を共通化する。各 fncl5_*.py は「論文のどの図表を作るか」だけを定義する薄い
 スクリプトになる。
@@ -23,13 +23,13 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # 保存専用 (fncl モジュールが pyplot を import する前に設定)
+matplotlib.use("Agg")  # 保存専用 (fncl パッケージが pyplot を import する前に設定)
 import torch
 
-EXAMPLES_DIR = Path(__file__).resolve().parent
-if str(EXAMPLES_DIR) not in sys.path:
-    sys.path.append(str(EXAMPLES_DIR))
-import forward_noise_covariance_learning as fncl  # noqa: E402
+DATA_DIR = Path(__file__).resolve().parent
+if str(DATA_DIR) not in sys.path:
+    sys.path.append(str(DATA_DIR))
+import fncl  # noqa: E402
 
 import matplotlib.pyplot as plt  # noqa: E402
 
@@ -259,8 +259,7 @@ def run_verification(noise: str, args) -> dict:
                f"H={args.hidden_dim}, T={args.num_samples}, "
                f"epochs={args.epochs}, lr={args.lr}")
     table = mse_table_md(mse, args.seed_list, caption)
-    print("\n" + table)
-    write_text(out / "table_final_mse.md", table)
+    print("\n" + table)                     # 表は標準出力のみ (ファイル保存しない)
     save_json(out / "results.json",
               {"config": config_dict(args), "noise": noise, "final_mse": mse})
     np.savez(out / "curves_preds.npz", x_raw=x_raw, target=target,

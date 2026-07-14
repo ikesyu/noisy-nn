@@ -2,9 +2,9 @@
 fncl5_2_fig.py — 論文 §5.2 の合成図 (subfigure) を curves_preds.npz から生成する.
 
 fncl5_2.py の本番実行後に走らせる (再学習は不要):
-  python tmp/fncl5_2_fig.py                # tmp/ から実行
-  python tmp/fncl5_2_fig.py --data out/fncl5_2 --formats png,pdf
-  python tmp/fncl5_2_fig.py --data out/fncl6_2   # §6.2 (uniform) にも使える
+  python data_nce/fncl5_2_fig.py                # プロジェクトルートから実行
+  python data_nce/fncl5_2_fig.py --data out/fncl5_2 --formats png,pdf
+  python data_nce/fncl5_2_fig.py --data out/fncl6_2   # §6.2 (uniform) にも使える
 
 生成物 (--data と同じディレクトリ):
   fig_main_result.png / .pdf
