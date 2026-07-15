@@ -710,3 +710,50 @@ $$
 **留保**：第 3 因子 $\hat{\mathbf{g}}^{(l)}$ はシナプスにとっては局所だが、その計算自体は上位層の $\hat{\boldsymbol\delta}^{(l+1)}$ を要する層方向の再帰（backprop の $\boldsymbol\delta$ と同型）である。これは per-neuron error 型の三要素則では標準的な構造で、シナプス局所性（更新が $\hat g_i,\phi_T',z_j$ の積で書ける）と誤差ベクトルを運ぶ層間の情報伝達は別レベルの話、と整理する。
 
 **他手法との対比**：`cov_deriv` も同じ三要素構造 $\partial L/\partial W^{(l)}_{ij} \approx \langle g^{(l)}_{z,i}\,\phi_T'(d^{(l)}_i)\,z^{(l-1)}_j\rangle$ を持つ。第 3 因子は両手法とも $\partial L/\partial z^{(l)}_i$ の推定だが、`cov_deriv` は $g^{(l)}_{z,i} = \mathrm{Cov}(L, z^{(l)}_i)/\mathrm{Var}(z^{(l)}_i)$ として大域損失 $L$ との共分散から直接得る（neo-Hebbian 寄り）のに対し、`cov_jac` 系は同じ量を $\hat g^{(l)}_i = \hat W^{(l+1)\mathsf{T}}\hat{\boldsymbol\delta}^{(l+1)}$ として mirror で層ごとに伝播させて構造化する（backprop 寄り）。第 3 因子の作り方の違いとして、三要素則の枠組みの中で両者を綺麗に対比できる。
+
+---
+
+## 追記：Cover letter 草案（NCE 投稿用）
+
+投稿フォームに貼り付ける想定の英語草案。日付・宛名は投稿時に確認する。
+
+```
+Dear Editors of Neuromorphic Computing and Engineering,
+
+I would like to submit the manuscript entitled "Reconstructing Backpropagation
+from Forward Fluctuations in Noise-modulated Neural Networks" for consideration
+as a Paper in Neuromorphic Computing and Engineering.
+
+A Noise-modulated Neural Network (NNN) computes with spike-like binary signals,
+using injected noise as a computational resource. It can be trained by
+backpropagation, but backpropagation requires a reverse path through transposed
+weight matrices, known as the weight transport problem. The manuscript shows that
+this reverse path can be reconstructed from forward-pass statistics. A weight
+mirror recovers the feedback weights from the covariance between a previous-layer
+unit's output and the next-layer unit's input, and a distribution-free estimator
+provides the local slope inside each unit. Combining the two propagates the output
+error recursively along the computational graph without transposed weight
+readouts. The resulting credit is an empirically near-unbiased estimator of the
+true gradient, and reaches the final accuracy of backpropagation on the tasks
+studied. Under uniform noise, the local operations reduce to polynomials and
+comparators, so inference and learning are both expressed in operations available
+to digital circuits.
+
+The work concerns learning rules for noise-based neuromorphic computation, and I
+hope it is of interest to the readership of the journal.
+
+The manuscript is original, has not been published elsewhere, and is not under
+consideration by another journal. It is single-authored and I have no competing
+interests to declare. The code needed to reproduce the results is publicly
+available under the MIT License, as stated in the data availability section.
+
+Thank you for your consideration.
+
+Yours sincerely,
+Shuhei Ikemoto
+Kyushu Institute of Technology
+shuhei.ikemoto@gmail.com
+```
+
+**投稿時に確認**: (i) 推薦査読者を cover letter 内に書くか投稿フォームの専用欄に入れるか、(ii) プレプリント（arXiv）に出す場合はその旨を 4 段落目に一文追加、(iii) companion 論文 [11] が査読中であれば同段落で開示する。
+
