@@ -1,6 +1,7 @@
 """forward_noise_covariance_learning.py — 全手法比較の PoC ランナー (CLI).
 
-実装は tmp/fncl_lib_tmp.py (data_nce/fncl/ の自己完結コピー) を使う。
+ライブラリ部分は nnn (nnn.stats / nnn.credit)、実験固有の部分は
+tmp/fncl_driver.py を使う。
 このスクリプトは backprop / cov_only / cov_deriv / cov_jac / cov_jac_full
 (+ gate 変種) を sin(x) 回帰で一括比較する対話的なランナーで、論文の図表生成
 (data_nce/) からは独立している。
@@ -24,9 +25,9 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from fncl_lib_tmp import (NUM_POINTS, build_model, predict, train_backprop,
-                          train_cov, plot_activity_stats, plot_fit_check,
-                          plot_losses, plot_predictions)
+from fncl_driver import (NUM_POINTS, build_model, predict, train_backprop,
+                         train_cov, plot_activity_stats, plot_fit_check,
+                         plot_losses, plot_predictions)
 
 
 # ============================================================

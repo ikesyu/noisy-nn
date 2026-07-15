@@ -19,8 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# 実装は tmp/fncl_lib_tmp.py (data_nce/fncl/ の自己完結コピー) を使う。
-from fncl_lib_tmp import savefig  # noqa: E402
+# 実験固有の部分は tmp/fncl_driver.py を使う。
+from fncl_driver import savefig  # noqa: E402
 
 
 def fig_gate_mse_vs_alpha(alphas, base, gate_mse, crn_mse, path) -> None:

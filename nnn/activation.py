@@ -126,7 +126,7 @@ class CrossingAnalytic(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         P, p = ctx.saved_tensors
-        coeff = (1 - 2 * P) * p
+        coeff = 2.0 * (1 - 2 * P) * p
         return coeff * grad_output, None, None
 
 

@@ -29,13 +29,14 @@ import argparse
 import numpy as np
 import torch
 import matplotlib
-matplotlib.use("Agg")  # 保存専用 (fncl_lib_tmp が pyplot を import する前に設定)
+matplotlib.use("Agg")  # 保存専用 (fncl_driver が pyplot を import する前に設定)
 
-# 実装は tmp/fncl_lib_tmp.py (data_nce/fncl/ の自己完結コピー) を使う。
-import fncl_lib_tmp as fncl  # noqa: E402
-from fncl_lib_tmp import (add_common_args, finalize_args, make_task,  # noqa: E402
-                          model_factory, run_method, config_dict,
-                          write_text, save_json)
+# ライブラリ部分は nnn (nnn.stats / nnn.credit)、実験固有の部分は
+# tmp/fncl_driver.py を使う (fncl_driver は nnn 側も re-export する)。
+import fncl_driver as fncl  # noqa: E402
+from fncl_driver import (add_common_args, finalize_args, make_task,  # noqa: E402
+                         model_factory, run_method, config_dict,
+                         write_text, save_json)
 from fncl_appB_fig import (fig_gate_mse_vs_alpha, fig_crn_degeneracy,  # noqa: E402
                            plot_negative_composite)
 

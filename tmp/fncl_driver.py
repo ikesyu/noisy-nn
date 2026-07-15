@@ -1,22 +1,22 @@
-"""fncl_lib_tmp.py — fncl パッケージ (data_nce/fncl/) の自己完結コピー (tmp 専用).
+"""fncl_driver.py — tmp 側実験の実験ドライバ (旧 fncl_lib_tmp.py の後継).
 
-data_nce/ は論文の Data availability 用スナップショットとして独立させるため、
-tmp 側の実験コード (forward_noise_covariance_learning.py, fncl_appB.py,
-fncl_appB_fig.py) が必要とする実装をこの 1 ファイルに抜き出した。
-正本は data_nce/fncl/ であり、論文の再現には data_nce/ を使うこと。
+共通・最小のライブラリ部分は nnn パッケージへ移した (nnn.stats: Capture /
+kde_slope / phi_prime / crossing_layers、nnn.credit: covariance_credit /
+cov_weight / ManualOpt / lr_at)。このモジュールに残るのは tmp 実験に固有の部分:
 
-内容:
-  - 数値定数                       (data_nce/fncl/constants.py)
-  - モデル構築・局所微分・計測      (data_nce/fncl/network.py)
-  - 外部摂動ゲート                 (data_nce/fncl/perturb.py)
-  - 学習則と backprop 参照         (data_nce/fncl/train.py)
-  - 確認用プロット                 (data_nce/fncl/viz.py)
-  - 実験ヘルパの最小集合           (data_nce/fncl_common.py から add_common_args /
-    finalize_args / config_dict / make_task / model_factory / run_method /
-    write_text / save_json / savefig)
+  - sin(x) 回帰タスクとモデル構築 (1 次元 bump タイリング初期化 + ノイズ場)
+  - 外部摂動ゲート (Appendix B 用: Perturber / gate_masks / RNG スナップショット)
+  - 学習則ドライバ train_cov (method 文字列で全手法を切り替える) と backprop 参照
+  - 確認用プロットと実験ヘルパ (argparse / タスク / 保存)
+
+利便のため nnn 側のライブラリ関数もここから re-export する (旧 fncl_lib_tmp と
+同じ `import fncl_driver as fncl` の使い方ができる)。
+
+論文の図表再現には data_nce/ を使うこと。このモジュールは tmp 専用であり、
+data_nce/ とは独立している (data_nce/fncl/ は自前の実装を持つ)。
 
 ヘッドレス実行するスクリプトは、このモジュールを import する前に
-matplotlib.use("Agg") を呼ぶこと (旧 fncl_common と同じ流儀)。
+matplotlib.use("Agg") を呼ぶこと。
 """
 from __future__ import annotations
 
@@ -31,68 +31,29 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# Use the local nnn library models.
+# Use the local nnn library.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
-from nnn import model  # noqa: E402
+from nnn import model, noise as nnn_noise  # noqa: E402
+from nnn.credit import (EPS, ManualOpt, cov_weight, covariance_credit,  # noqa: E402,F401
+                        lr_at)
+from nnn.stats import (Capture, crossing_layers, kde_slope,  # noqa: E402,F401
+                       phi_prime)
 
-SQRT2 = math.sqrt(2.0)
-EPS = 1e-6
 NUM_POINTS = 128
 UNIFORM_CENTER = 0.0
 
 
-# ============================================================
-# Noise-induced local derivatives phi'(d) = dz/dd of the expected crossing response
-# ============================================================
-def gauss_cdf(d: torch.Tensor, sigma: float) -> torch.Tensor:
-    return 0.5 * (1.0 + torch.erf(d / (sigma * SQRT2)))
-
-
-def gauss_pdf(d: torch.Tensor, sigma: float) -> torch.Tensor:
-    return torch.exp(-(d * d) / (2.0 * sigma * sigma)) / (sigma * math.sqrt(2.0 * math.pi))
-
-
-def phi_prime(d: torch.Tensor, noise: str, sigma: float, radius: float) -> torch.Tensor:
-    """Local derivative of the EXPECTED crossing response for the chosen noise.
-
-    gaussian: phi_bar(d) = 2 F(d)(1-F(d))          -> phi' = 2 (1 - 2 F(d)) p(d)
-    uniform : phi_bar(d) = 0.5 [1 - ((d-c)/r)^2]_+ -> phi' = -(d-c)/r^2  (inside support)
-    """
+def noise_funcs(noise: str, sigma: float, radius: float):
+    """(pdf, cdf) closures of the injected noise, for nnn.stats.phi_prime."""
     if noise == "gaussian":
-        F = gauss_cdf(d, sigma)
-        return 2.0 * (1.0 - 2.0 * F) * gauss_pdf(d, sigma)
-    u = d - UNIFORM_CENTER
-    return torch.where(u.abs() < radius, -u / (radius * radius), torch.zeros_like(u))
-
-
-def kde_slope(crossing_layer, d_clean: torch.Tensor) -> torch.Tensor:
-    """Distribution-FREE local slope dz_bar/dd from the Crossing's OWN internal density
-    estimate -- no analytic phi', no knowledge of the noise distribution.
-
-    The library's CrossingSample.backward computes, per unit,
-
-        coeff = mean_t(xor2 - xor1) / (2h)
-
-    where xor1/xor2 count level crossings of the SAME noisy samples at the thresholds +h
-    and -h.  Evaluating the two thresholds on one shared sample set is exactly an
-    ANTITHETIC / COMMON-RANDOM-NUMBER finite difference: shifting the threshold by +/-h is
-    equivalent to shifting the pre-activation d by -/+h, and the common samples make the
-    noise cancel in the difference -> a low-variance, distribution-free estimate of dz/dd.
-
-    We obtain it by a LOCAL grad-enabled re-run of just this crossing layer (fresh noise;
-    a single unit's activation derivative -- NO transposed-weight backward, no readout).
-    Because the noise addition d -> d + eta has unit gradient w.r.t. d, autograd routes
-    CrossingSample.backward's coeff straight onto d_clean.grad.
-
-    Returns dz/dd of shape [N, T, H] (constant across T; the library repeats coeff over T).
-    """
-    with torch.enable_grad():
-        d_req = d_clean.detach().clone().requires_grad_(True)
-        z = crossing_layer(d_req)                 # noise + CrossingSample, this layer only
-        z.sum().backward()                        # grad_output = 1 -> d_req.grad = coeff
-    return d_req.grad.detach()
+        return (nnn_noise.gaussian_pdf_torch(0.0, sigma),
+                nnn_noise.gaussian_cdf_torch(0.0, sigma))
+    if noise == "uniform":
+        return (nnn_noise.uniform_pdf_torch(UNIFORM_CENTER, radius),
+                nnn_noise.uniform_cdf_torch(UNIFORM_CENTER, radius))
+    raise ValueError(f"--noise must be 'gaussian' or 'uniform', got '{noise}'")
 
 
 # ============================================================
@@ -141,44 +102,6 @@ def build_model(noise: str, hidden: int, sigma: float, radius: float, h: float,
                 cl.radius = radius * s
     net.noise_field = [s for _ in range(n_hidden)]
     return net.to(device)
-
-
-def crossing_layers(net):
-    """The list of hidden crossing activation modules of a Sample/UniformSample net."""
-    return getattr(net, "gaussian_crossing", None) or net.uniform_crossing
-
-
-# ============================================================
-# Forward-hook capture of the model's internal per-sample activations
-# ============================================================
-class Capture:
-    """Captures, per forward pass: for each hidden crossing layer its input d_l and
-    output z_l (shape [N, T, H]); and the readout layer's pre-ensemble output
-    y_samples (shape [N, T, 1])."""
-
-    def __init__(self, net):
-        self.crossings = crossing_layers(net)
-        self.n_hidden = len(self.crossings)
-        self.d = [None] * self.n_hidden
-        self.z = [None] * self.n_hidden
-        self.y_samples = None
-        self.handles = []
-        for l, layer in enumerate(self.crossings):
-            self.handles.append(layer.register_forward_hook(self._make(l)))
-        self.handles.append(net.fcs[-1].register_forward_hook(self._readout_hook))
-
-    def _make(self, l):
-        def hook(module, inp, out):
-            self.d[l] = inp[0].detach()
-            self.z[l] = out.detach()
-        return hook
-
-    def _readout_hook(self, module, inp, out):
-        self.y_samples = out.detach()      # [N, T, 1] (before EnsembleMeanLayer)
-
-    def remove(self):
-        for hnd in self.handles:
-            hnd.remove()
 
 
 # ============================================================
@@ -286,115 +209,10 @@ def gate_masks(hidden_sizes, epoch: int, block_size: int, mode: str,
 
 
 # ============================================================
-# Proposed forward-noise covariance learning (manual; NO autograd for the network)
+# Forward-noise covariance learning driver (manual; NO autograd for the network).
+# The estimators themselves live in nnn.credit / nnn.stats; this dispatches the
+# method variants and runs the update loop.
 # ============================================================
-def covariance_credit(z_l, L, credit):
-    """Estimate the activity-side credit g_z ~= dL/dz from stochastic samples.
-
-    z_l : [N, T, H]  (T = samples, pooled over the credit passes)
-    L   : [N, T]     (per-sample loss)
-    credit == "pooled"   : one global scalar per unit, g_z [H]  (centre over N,T).
-    credit == "per_input": input-specific credit, g_z [N, H]  (centre over T only,
-        so the confounding between-input loss variation is removed -> a much less
-        biased, input-dependent estimate of the local gradient).
-    Returns (g_broadcast, g_unit) where g_broadcast broadcasts against [N, T, H] and
-    g_unit is a [H] per-unit summary for the activity-stats figure.
-    """
-    if credit == "pooled":
-        cz = z_l - z_l.mean(dim=(0, 1), keepdim=True)
-        cL = (L - L.mean()).unsqueeze(-1)                       # [N, T, 1]
-        cov = (cL * cz).mean(dim=(0, 1))                        # [H]
-        var = (cz ** 2).mean(dim=(0, 1))                        # [H]
-        g_z = cov / (var + EPS)                                 # [H]
-        return g_z.view(1, 1, -1), g_z
-    # per_input
-    cz = z_l - z_l.mean(dim=1, keepdim=True)                    # [N, T, H]
-    cL = (L - L.mean(dim=1, keepdim=True)).unsqueeze(-1)        # [N, T, 1]
-    cov = (cL * cz).mean(dim=1)                                 # [N, H]
-    var = (cz ** 2).mean(dim=1)                                 # [N, H]
-    g_z = cov / (var + EPS)                                     # [N, H]
-    return g_z.unsqueeze(1), g_z.mean(dim=0)                    # broadcast [N,1,H], unit [H]
-
-
-def cov_weight(d_next, z_prev, pool: bool = False):
-    """WEIGHT MIRROR (cov_jac): estimate the forward weight W (d_next = W z_prev + b)
-    from forward-noise covariance alone -- NO explicit transpose.
-
-    Because the pre-activation is LINEAR in the previous activity, per input the
-    single-variable regression coefficient of d_next_j on z_prev_i equals W_ji when the
-    z_prev_i fluctuate independently (which they do: independent per-unit crossing noise
-    at a fixed input).  We therefore estimate it WITHIN each input (over the T samples,
-    where the fluctuation is pure noise) and average over inputs:
-
-        W_hat[j,i] = mean_n  Cov_t(d_next_j, z_prev_i) / Var_t(z_prev_i)   ~=   W_{ji}
-
-    NB: correlate with the CONTINUOUS pre-activation d_next, never the binary z_next
-    (the latter is a poor estimator -- the same binary degeneracy as the CRN gate).
-
-    d_next : [N, T, Ho]   z_prev : [N, T, Hi]   ->   W_hat : [Ho, Hi]
-    """
-    cd = d_next - d_next.mean(dim=1, keepdim=True)              # [N, T, Ho]
-    cz = z_prev - z_prev.mean(dim=1, keepdim=True)              # [N, T, Hi]
-    cov = torch.einsum("nto,nti->noi", cd, cz) / d_next.shape[1]  # [N, Ho, Hi]
-    var = (cz ** 2).mean(dim=1)                                 # [N, Hi]
-    if pool:
-        # Variance-weighted "within" pooling over inputs (idea 2): keep the per-input
-        # centering (so the between-input cross-unit confound is NOT reintroduced) but
-        # SUM numerator and denominator over inputs before dividing.  Because W is the
-        # SAME for every input (unlike the gradient), this uses all N*T samples for one
-        # estimate -> far lower variance than mean_n(cov_n / var_n).
-        return cov.sum(dim=0) / (var.sum(dim=0).unsqueeze(0) + EPS)  # [Ho, Hi]
-    W = cov / (var.unsqueeze(1) + EPS)                          # [N, Ho, Hi]
-    return W.mean(dim=0)                                        # [Ho, Hi]
-
-
-class ManualOpt:
-    """Minimal in-place optimiser for the manually-computed gradients.
-
-    kind == "sgd"  : param -= lr * grad.
-    kind == "adam" : an Adam step (adaptive/preconditioned) using the SAME manual
-        gradients -- this only changes HOW the step is taken, not the forward-noise
-        credit itself (still no transposed-weight backward pass).
-    """
-
-    def __init__(self, kind: str, beta1: float = 0.9, beta2: float = 0.999,
-                 eps: float = 1e-8):
-        self.kind = kind
-        self.b1, self.b2, self.eps = beta1, beta2, eps
-        self.m, self.v, self.step = {}, {}, {}
-
-    def update(self, key: str, param, grad, lr: float):
-        """Apply the step in place and RETURN the decrement applied (delta = before -
-        after), so cov_jac can integrate the same known increment into its weight
-        mirrors (Kolen-Pollack tracking)."""
-        if self.kind == "sgd":
-            step = lr * grad
-            param.data -= step
-            return step
-        if key not in self.m:
-            self.m[key] = torch.zeros_like(grad)
-            self.v[key] = torch.zeros_like(grad)
-            self.step[key] = 0
-        self.step[key] += 1
-        m, v = self.m[key], self.v[key]
-        m.mul_(self.b1).add_(grad, alpha=1.0 - self.b1)
-        v.mul_(self.b2).addcmul_(grad, grad, value=1.0 - self.b2)
-        m_hat = m / (1.0 - self.b1 ** self.step[key])
-        v_hat = v / (1.0 - self.b2 ** self.step[key])
-        step = lr * m_hat / (v_hat.sqrt() + self.eps)
-        param.data -= step
-        return step
-
-
-def lr_at(lr0: float, epoch: int, epochs: int, decay: str) -> float:
-    """Learning-rate schedule (shrinks the end-stage stochastic 'noise ball')."""
-    if decay == "cosine":
-        return lr0 * 0.5 * (1.0 + math.cos(math.pi * epoch / max(1, epochs)))
-    if decay == "exp":
-        return lr0 * (0.01 ** (epoch / max(1, epochs)))     # -> 1% of lr0 at the end
-    return lr0
-
-
 def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: float,
               radius: float, method: str, lr: float, epochs: int,
               hidden_lr_scale: float = 1.0, credit: str = "per_input",
@@ -408,7 +226,7 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
     Hidden layers: covariance credit (x local slope) from captured per-sample
     activations; `credit` selects pooled vs per-input estimation.  For method "cov_deriv"
     the slope is `slope="kde"` (DEFAULT: the crossing's own distribution-free density
-    estimate (xor2-xor1)/(2h)) or `slope="analytic"` (the hand-coded phi'(d)).
+    estimate (xor2-xor1)/(2h)) or `slope="analytic"` (the closed-form phi'(d)).
     `credit_passes` accumulates the statistics over several stochastic forward passes
     (variance reduction: effective samples = credit_passes * t).  Output layer: exact
     readout gradient on the ENSEMBLE-MEAN features (expected-value readout).  All no-grad.
@@ -444,6 +262,7 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
     jac = method in ("cov_jac", "cov_jac_full")
     jac_full = method == "cov_jac_full"
     field_gate = method == "cov_deriv_field_gate"
+    pdf, cdf = noise_funcs(noise, sigma, radius)    # for the analytic phi'(d)
     W_ema = {}                                      # cov_jac: running weight mirrors
     cap = Capture(net)
     n_hidden = cap.n_hidden
@@ -595,7 +414,7 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
                         delta_hat = g_bcast.expand_as(z[l])
                     elif method == "cov_deriv" and slope == "analytic":
                         # analytic, noise-distribution-specific local slope phi'(d) (ablation)
-                        delta_hat = g_bcast * phi_prime(d[l], noise, sigma, radius)
+                        delta_hat = g_bcast * phi_prime(d[l], pdf, cdf)
                     else:  # cov_deriv (DEFAULT slope="kde") or cov_deriv_kde alias
                         # distribution-FREE slope from the crossing's own internal density
                         # estimate coeff = mean_t(xor2 - xor1)/(2h) (an antithetic / CRN
@@ -613,7 +432,7 @@ def train_cov(net, x: torch.Tensor, t_target: torch.Tensor, noise: str, sigma: f
                 stats.append({
                     "g_z": g_unit.cpu(),
                     "mean_activity": z[l].mean(dim=(0, 1)).cpu(),
-                    "phi_prime": phi_prime(d[l], noise, sigma, radius).mean(dim=(0, 1)).cpu(),
+                    "phi_prime": phi_prime(d[l], pdf, cdf).mean(dim=(0, 1)).cpu(),
                 })
 
             # --- readout on the EXPECTED (ensemble-mean) features ---
@@ -770,8 +589,7 @@ def plot_fit_check(x_raw, target, preds: dict,
 
 
 # ============================================================
-# 実験ヘルパの最小集合 (data_nce/fncl_common.py から抜粋; fncl. 参照を同一
-# モジュール内の直接参照に置換)
+# 実験ヘルパの最小集合 (data_nce/fncl_common.py と同等; tmp 側で自己完結させる)
 # ============================================================
 def add_common_args(p: argparse.ArgumentParser, *, epochs: int = 1500,
                     hidden_dim: int = 64, num_samples: int = 64,
@@ -823,12 +641,12 @@ def model_factory(noise: str, args: argparse.Namespace, device: torch.device,
                   field: torch.Tensor = None):
     """同一初期重みのネットワークを繰り返し生成する fresh() を返す."""
     net0 = build_model(noise, args.hidden_dim, args.sigma, args.radius,
-                            args.crossing_h, args.num_samples, device, field=field)
+                       args.crossing_h, args.num_samples, device, field=field)
     init_state = copy.deepcopy(net0.state_dict())
 
     def fresh():
         n = build_model(noise, args.hidden_dim, args.sigma, args.radius,
-                             args.crossing_h, args.num_samples, device, field=field)
+                        args.crossing_h, args.num_samples, device, field=field)
         n.load_state_dict(init_state)
         return n
 
@@ -859,6 +677,7 @@ def run_method(spec: dict, fresh, x, t, noise: str, args, log_every: int = 0):
     pred = predict(net, x)
     return losses, pred, net
 
+
 def write_text(path: Path, text: str) -> None:
     Path(path).write_text(text, encoding="utf-8")
     print(f"  saved {path}")
@@ -877,4 +696,3 @@ def savefig(fig, path: Path) -> None:
     fig.savefig(path.with_suffix(".pdf"))
     plt.close(fig)
     print(f"  saved {path} (+ .pdf)")
-

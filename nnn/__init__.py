@@ -6,4 +6,6 @@ Modules:
     model       : simple feedforward NNN models
     noise       : noise samplers and distribution functions (PDF / CDF)
     noise_field : spatial noise-field (recruitment) utilities
+    stats       : forward-pass capture and local slopes (KDE / analytic)
+    credit      : credit estimators from forward noise (weight mirror, optimiser)
 """
