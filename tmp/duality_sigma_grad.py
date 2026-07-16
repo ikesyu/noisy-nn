@@ -44,15 +44,29 @@ WHAT IT FOUND (1000 epochs, H=32, T=32, seed 0; see docs/idea_duality.md 9 and 1
     Uniform keeps r ~ 0.83-0.90: its phi_bar' is discontinuous at the support edge,
     so the O(h^2) error piles up on the kink and coupling cannot remove it.
 
-  * SPSA reads the SAME direction; the difference is variance alone.  Averaging K
-    independent SPSA draws and taking the cosine against the sigma gradient:
-        K =   1  ->  0.010     K =  64  ->  0.347
-        K =   4  ->  0.143     K = 256  ->  0.641
-    This fits cos(K) = 1/sqrt(1 + v/K) with v = 388 (residual rms 0.031), so the
-    cosine converges on 1.  SPSA needs ~3310 extra forward passes to reach cos=0.9.
-    The sigma gradient reads that direction off the T samples inference already
-    drew: 0 extra passes.  This is the strongest and most setting-independent
-    claim of direction A -- stronger than any loss comparison.
+  * SPSA climbs towards the sigma gradient's direction, but stops SHORT of it, and
+    the budget it spends getting there is the strongest claim here.  Averaging K
+    independent draws and taking the cosine against the sigma gradient (couple_h,
+    seed 0) gives 0.048, 0.111, 0.192, 0.397, 0.655, 0.821 at K = 1 .. 1024.
+    Fitting cos(K) = c/sqrt(1 + v/K) with c FREE (an earlier pass fixed c = 1, which
+    assumed the answer) gives c_inf = 0.94, v = 297, and the pooled draws say the
+    same with no fit at all: c_inf = 0.93, v = 249.  So:
+        - v is the variance SPSA pays.  Theory says v = (d+1) + d*sigma_eta^2/|g|^2,
+          i.e. its FLOOR is the field dimension; killing the loss noise (T -> 512)
+          drives v to 72.3 against a floor of d+1 = 65.  The sigma gradient's cost
+          does not move with d at all.
+        - c_inf is NOT 1, so "the difference is variance alone" is false.  It is the
+          sigma gradient's fidelity to the true field gradient, and 0.94 is well
+          below the 0.998 the weight gradient reaches in the paper's 5.3.  It is not
+          the Var(y) term either: c_inf plateaus at ~0.95 as T grows rather than
+          climbing to 1, and giving the reference the same T does not move it, so
+          the residue is structural in the cov_jac credit.
+    The honest budget statement compares both against the SAME reference: SPSA needs
+    v*c_inf^2/(1-c_inf^2) draws to be as close to the true gradient as the sigma
+    gradient already is.  That is 4551 extra forwards here, 1721 with common random
+    numbers (--spsa-crn, the strongest form of the baseline), 1657-7005 over seeds.
+    The sigma gradient reads its direction off the T samples inference already drew:
+    0 extra passes.  See docs/idea_duality.md 11.
 
   * With both controls in place, the sigma gradient wins on loss too.  Final total
     MSE, spsa vs sigma_grad:
@@ -76,6 +90,9 @@ Run
 ---
     python tmp/duality_sigma_grad.py --check --couple-h 0.2        # identity (fast)
     python tmp/duality_sigma_grad.py --compare-dir --couple-h 0.2  # direction vs K
+    python tmp/duality_sigma_grad.py --compare-dir --couple-h 0.2 --spsa-crn
+    python tmp/duality_sigma_grad.py --eval-t-sweep --couple-h 0.2 # is it Var(y)?
+    python tmp/duality_sigma_grad.py --dim-sweep --couple-h 0.2    # v against dim
     python tmp/duality_sigma_grad.py --quick                       # 4 conditions, small
     python tmp/duality_sigma_grad.py --couple-h 0.2 --matched-step 0.01
     python tmp/duality_sigma_grad.py --noise uniform --couple-h 0.2 --matched-step 0.02
@@ -86,6 +103,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import sys
 from pathlib import Path
 
@@ -137,6 +155,9 @@ def parse_args() -> argparse.Namespace:
                         "0 disables (Adam with --lr-p)")
     p.add_argument("--jac-ema", type=float, default=0.9)
     p.add_argument("--eps-p", type=float, default=0.05, help="SPSA perturbation size")
+    p.add_argument("--spsa-crn", action="store_true",
+                   help="replay the same noise in the + and - SPSA passes (common "
+                        "random numbers), the strongest form of the baseline")
     p.add_argument("--lambda-sparse", type=float, default=1e-3)
     p.add_argument("--lambda-overlap", type=float, default=1e-2)
     p.add_argument("--field-bias", type=float, default=0.3,
@@ -153,8 +174,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compare-dir", action="store_true",
                    help="only measure cos(SPSA direction, sigma-gradient direction) "
                         "as the SPSA sample budget K grows")
-    p.add_argument("--spsa-k", type=str, default="1,4,16,64,256",
+    p.add_argument("--spsa-k", type=str, default="1,4,16,64,256,1024",
                    help="SPSA budgets K averaged for --compare-dir")
+    p.add_argument("--spsa-m", type=int, default=4096,
+                   help="independent SPSA draws pooled by --compare-dir. Every budget "
+                        "K resamples these, and they also carry the moment estimate of "
+                        "v, so the fitted curve has an independent cross-check")
+    p.add_argument("--n-est", type=int, default=200,
+                   help="passes averaged into the reference sigma gradient. Its own "
+                        "noise attenuates c_inf, so this is measured (split-half) "
+                        "rather than assumed")
+    p.add_argument("--dim-sweep", action="store_true",
+                   help="measure v at several field dimensions. SPSA's variance grows "
+                        "with the dimension it must search, so v ~ dim turns the "
+                        "budget gap into a scaling law")
+    p.add_argument("--dim-list", type=str, default="8,16,32,64",
+                   help="hidden widths H swept by --dim-sweep (field dim = 2H)")
+    p.add_argument("--sweep-m", type=int, default=2048,
+                   help="SPSA draws per width in --dim-sweep")
+    p.add_argument("--eval-t-sweep", action="store_true",
+                   help="measure c_inf against the T that SPSA's loss is averaged "
+                        "over, with theta and the field held fixed. This isolates "
+                        "the Var(y) term the sigma gradient drops")
+    p.add_argument("--eval-t-list", type=str, default="8,32,128,512",
+                   help="evaluation sample counts swept by --eval-t-sweep")
     p.add_argument("--out", type=str, default="out/duality_sigma_grad")
     p.add_argument("--quick", action="store_true")
     args = p.parse_args()
@@ -164,6 +207,11 @@ def parse_args() -> argparse.Namespace:
         args.num_samples = min(args.num_samples, 16)
         args.check_passes = min(args.check_passes, 10)
         args.check_n = min(args.check_n, 1000)
+        args.spsa_m = min(args.spsa_m, 512)
+        args.sweep_m = min(args.sweep_m, 512)
+        args.n_est = min(args.n_est, 20)
+        args.spsa_k = "1,4,16,64"
+        args.dim_list = "8,16"
     args.out_dir = Path(args.out)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     return args
@@ -442,14 +490,26 @@ def apply_field_step(field, grads, opt, tag, args) -> None:
 
 
 def spsa_direction(net, x, field, other, t, a_first: bool, args) -> list:
-    """One symmetric SPSA estimate of dL/dfield: two extra forward passes."""
+    """One symmetric SPSA estimate of dL/dfield: two extra forward passes.
+
+    --spsa-crn replays the same noise draws in both passes (common random numbers).
+    That is the textbook way to stop the loss's own sampling noise from swamping a
+    difference quotient, and it is the strongest form of this baseline, so it is
+    offered here rather than assumed away.  Whether it helps is a question about the
+    crossing: the field enters as a scale, xi = sigma * u, so replaying u makes the
+    two passes differ smoothly in sigma -- but the crossing is binary, and a paired
+    difference over binary responses is exactly what degenerated in Appendix B.
+    """
     deltas = [torch.randn_like(v) for v in field]
     fp = [(v + args.eps_p * dv).clamp(min=args.sigma_min)
           for v, dv in zip(field, deltas)]
     fm = [(v - args.eps_p * dv).clamp(min=args.sigma_min)
           for v, dv in zip(field, deltas)]
+    state = torch.get_rng_state() if args.spsa_crn else None
     lp = (float(((forward_with_field(net, x, fp, args) - t) ** 2).mean())
           + float(reg_value(*((fp, other) if a_first else (other, fp)), args)))
+    if state is not None:
+        torch.set_rng_state(state)
     lm = (float(((forward_with_field(net, x, fm, args) - t) ** 2).mean())
           + float(reg_value(*((fm, other) if a_first else (other, fm)), args)))
     scale = (lp - lm) / (2.0 * args.eps_p)
@@ -603,17 +663,267 @@ def run_check(args, device) -> None:
 # ============================================================
 # Direction check: is SPSA just a noisy read of the sigma gradient?
 # ============================================================
+def pretrain_theta(net, cap, x, t, field, args, n_hidden: int):
+    """Train theta by cov_jac for a while, so the field gradient is measured at a
+    state the network actually reaches rather than at initialisation."""
+    opt = ManualOpt("adam")
+    W_ema: dict = {}
+    pre = max(1, args.epochs // 5)
+    for _ in range(pre):
+        st = forward_stats(net, cap, x, t, field, args)
+        update_mirrors(W_ema, st, n_hidden, args.jac_ema)
+        a = jac_credit(st, W_ema, t, n_hidden)
+        theta_step(net, opt, W_ema, [(st, a, t)], x, n_hidden, args.lr_theta)
+    return W_ema, float(((st["y"] - t) ** 2).mean()), pre
+
+
+def sigma_reference(net, cap, x, t, fa, fb, W_ema, args, n_hidden: int, n_est: int):
+    """The sigma gradient of field A, averaged over `n_est` passes, flattened.
+
+    Averaging damps the estimator's own variance but not its bias, which is the
+    point: what stays as n_est grows is the systematic direction, and that is what
+    c_inf below is meant to score.  The regulariser gradient is exact, so it is
+    added once at the end.
+    """
+    acc = [torch.zeros(args.hidden_dim, device=x.device) for _ in range(n_hidden)]
+    for _ in range(n_est):
+        st = forward_stats(net, cap, x, t, fa, args)
+        a = jac_credit(st, W_ema, t, n_hidden)
+        for l, g in enumerate(sigma_grad(st, a, fa, n_hidden, args.sigma_min)):
+            acc[l] += g / n_est
+    greg, _ = reg_grads(fa, fb, args)
+    return torch.cat([(g + r).reshape(-1) for g, r in zip(acc, greg)])
+
+
+def spsa_draws(net, x, fa, fb, t, args, m: int) -> torch.Tensor:
+    """`m` independent SPSA estimates of dL/dP_A, flattened into [m, dim].
+
+    Pooling the draws once and resampling them for every budget K costs 2m forwards
+    instead of 2*sum(K)*repeats, and the same draws then carry the moment estimate
+    of v, so the fitted curve can be checked against a statistic that assumes no
+    functional form at all.
+    """
+    rows = []
+    for _ in range(m):
+        g = spsa_direction(net, x, fa, fb, t, True, args)
+        rows.append(torch.cat([v.reshape(-1) for v in g]))
+    return torch.stack(rows)
+
+
+def spsa_moments(G: torch.Tensor) -> tuple:
+    """(|g_true|^2, tr Sigma, v) from the pooled draws, with no curve fitting.
+
+    Each draw is unbiased, so E|mean|^2 = |g|^2 + tr(Sigma)/m overstates the signal
+    by exactly the noise it carries; subtracting that term is what makes |g|^2 an
+    estimate of the TRUE gradient's length rather than of this sample's.  Then
+    v = tr(Sigma)/|g|^2 is the same v that appears in cos(K) = c_inf/sqrt(1 + v/K).
+    """
+    m = G.shape[0]
+    gbar = G.mean(dim=0)
+    tr_sigma = float(G.var(dim=0, unbiased=True).sum())
+    g2 = float((gbar ** 2).sum()) - tr_sigma / m
+    return g2, tr_sigma, tr_sigma / g2 if g2 > 0 else float("nan")
+
+
+def cos_curve(G: torch.Tensor, u: torch.Tensor, ks, reps: int, gen) -> tuple:
+    """Mean +- sd of cos(SPSA averaged over K draws, u), by resampling the pool."""
+    mean, sd = [], []
+    for K in ks:
+        vals = []
+        for _ in range(reps):
+            idx = torch.randint(0, G.shape[0], (K,), generator=gen, device=G.device)
+            gm = G[idx].mean(dim=0)
+            vals.append(float(torch.nn.functional.cosine_similarity(gm, u, dim=0)))
+        mean.append(float(np.mean(vals)))
+        sd.append(float(np.std(vals)))
+    return mean, sd
+
+
+def fit_cos_curve(ks, cos, fix_c=None) -> tuple:
+    """Least squares fit of cos(K) = c / sqrt(1 + v/K); returns (c, v, rms).
+
+    `fix_c=1.0` reproduces the one-parameter fit, which ASSUMES the two estimators
+    agree in the limit.  Leaving c free instead measures the limit, and c is linear
+    given v, so only v needs searching.
+    """
+    k = np.asarray(ks, dtype=float)
+    y = np.asarray(cos, dtype=float)
+
+    def best_c(v):
+        f = 1.0 / np.sqrt(1.0 + v / k)
+        c = fix_c if fix_c is not None else float((y * f).sum() / (f * f).sum())
+        return c, float(np.sqrt(((y - c * f) ** 2).mean()))
+
+    grid = np.logspace(-2.0, 6.0, 4000)
+    v = min(grid, key=lambda g: best_c(g)[1])
+    fine = np.linspace(v * 0.5, v * 2.0, 4000)
+    v = float(min(fine, key=lambda g: best_c(g)[1]))
+    c, rms = best_c(v)
+    return c, v, rms
+
+
+def budget_for(target: float, c_inf: float, v: float):
+    """K at which cos(SPSA_K, sigma_grad) reaches `target`, or None if unreachable.
+
+    SPSA cannot exceed c_inf however large the budget, so a target above it has no
+    answer: the gap there is not variance any more, it is the two estimators
+    disagreeing about what the gradient is.
+    """
+    if target >= c_inf:
+        return None
+    return v / ((c_inf / target) ** 2 - 1.0)
+
+
+def matching_budget(c_inf: float, v: float):
+    """K at which SPSA is as close to the TRUE gradient as the sigma gradient is.
+
+    cos(SPSA_K, g_true) = 1/sqrt(1 + v/K) and cos(sigma_grad, g_true) = c_inf, so
+    the budget that buys SPSA the fidelity the sigma gradient already has is
+    v*c_inf^2/(1 - c_inf^2).  This is the honest form of the budget claim: it
+    compares both rules against the same reference instead of against each other.
+    """
+    if not 0.0 < c_inf < 1.0:
+        return None
+    return v * c_inf ** 2 / (1.0 - c_inf ** 2)
+
+
+def measure_direction(args, device, seed_offset: int = 0) -> dict:
+    """One (v, c_inf) measurement at the current args: the whole pipeline."""
+    torch.manual_seed(args.seed + seed_offset)
+    np.random.seed(args.seed + seed_offset)
+    _, x, tA, tB = make_tasks(device)
+    net = build_model(args, device)
+    n_hidden = len(net.structure) - 2
+    fa, fb = init_fields(args, n_hidden, device)
+    cap = Capture(net)
+    out = {"dim": n_hidden * args.hidden_dim, "H": args.hidden_dim}
+
+    with torch.no_grad():
+        W_ema, mse, pre = pretrain_theta(net, cap, x, tA, fa, args, n_hidden)
+        out["pretrain_mse"], out["pretrain_epochs"] = mse, pre
+
+        # two independent references: their cosine says how much of c_inf's shortfall
+        # is just the reference's own noise (attenuation), and how much is systematic
+        g1 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                             args.n_est)
+        g2 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                             args.n_est)
+        rho = float(torch.nn.functional.cosine_similarity(g1, g2, dim=0))
+        g_sigma = 0.5 * (g1 + g2)
+        out["split_half"] = rho
+
+        G = spsa_draws(net, x, fa, fb, tA, args, args.spsa_m)
+    cap.remove()
+
+    g2n, tr_sigma, v_mom = spsa_moments(G)
+    out["v_moment"], out["g_true_sq"], out["tr_sigma"] = v_mom, g2n, tr_sigma
+    out["dim_plus_1"] = out["dim"] + 1
+
+    gbar = G.mean(dim=0)
+    cos_bar = float(torch.nn.functional.cosine_similarity(gbar, g_sigma, dim=0))
+    out["c_moment"] = cos_bar * math.sqrt(1.0 + v_mom / G.shape[0])
+    out["G"], out["g_sigma"] = G, g_sigma
+    return out
+
+
 def run_compare_dir(args, device) -> None:
     """cos(SPSA averaged over K draws, sigma gradient) as the budget K grows.
 
-    SPSA is unbiased, so averaging K independent draws converges on the true field
-    gradient.  If the cosine against the sigma gradient climbs towards 1 as K grows,
-    then the two agree on the direction and the only difference is variance: SPSA
-    needs 2K forward passes to find what the sigma gradient reads off the passes the
-    network was making anyway.  That is the claim of direction A, measured directly.
+    SPSA is unbiased for the true field gradient, so averaging K draws converges on
+    it.  Where that cosine goes as K grows therefore separates two very different
+    claims: the RATE says how much variance SPSA is paying (v), and the LIMIT says
+    whether the sigma gradient is pointing where the true gradient points (c_inf).
+    Forcing the limit to 1, as the first pass did, assumes the second answer instead
+    of measuring it, and the sigma gradient is not exactly unbiased for this
+    objective: it estimates the signal term of E[L] = (E[y]-t)^2 + Var(y) and drops
+    the variance term.  So c_inf is fitted here, not fixed.
     """
     print("=== direction: SPSA (budget K) vs the sigma gradient ===")
     ks = [int(v) for v in args.spsa_k.split(",") if v.strip()]
+    r = measure_direction(args, device)
+    print(f"  pretrained theta for {r['pretrain_epochs']} epochs, "
+          f"mse={r['pretrain_mse']:.5f}")
+    print(f"  field dim = {r['dim']},  SPSA draws pooled = {args.spsa_m}")
+    print(f"  reference sigma gradient: split-half cos = {r['split_half']:.4f} "
+          f"({args.n_est} passes each; attenuation "
+          f"{math.sqrt(max(r['split_half'], 0.0)):.4f})")
+
+    gen = torch.Generator(device=r["G"].device).manual_seed(args.seed + 1)
+    cos_mean, cos_std = cos_curve(r["G"], r["g_sigma"], ks, 16, gen)
+    for K, m, s in zip(ks, cos_mean, cos_std):
+        print(f"  K = {K:5d}  ({2 * K:6d} extra forwards)   "
+              f"cos(SPSA_K, sigma_grad) = {m:.3f} +- {s:.3f}")
+
+    c1, v1, rms1 = fit_cos_curve(ks, cos_mean, fix_c=1.0)
+    c2, v2, rms2 = fit_cos_curve(ks, cos_mean)
+    print("\n  fits of cos(K) = c / sqrt(1 + v/K):")
+    print(f"    c fixed at 1 : v = {v1:8.1f}                 rms = {rms1:.4f}")
+    print(f"    c free       : v = {v2:8.1f}   c_inf = {c2:.4f}   rms = {rms2:.4f}")
+    print(f"    moments      : v = {r['v_moment']:8.1f}   c_inf = {r['c_moment']:.4f}"
+          f"   (no fit; from the {args.spsa_m} draws)")
+    print(f"    dim + 1      : v = {r['dim_plus_1']:8.1f}   "
+          f"(SPSA's variance with a noiseless loss)")
+
+    print("\n  budget for SPSA to reach a given cos with the sigma gradient:")
+    for target in (0.5, 0.9, 0.99):
+        K = budget_for(target, c2, v2)
+        if K is None:
+            print(f"    cos = {target:.2f}   UNREACHABLE (above c_inf = {c2:.3f})")
+        else:
+            print(f"    cos = {target:.2f}   K = {K:9.0f}   "
+                  f"{2 * K:10.0f} extra forwards")
+    Km = matching_budget(c2, v2)
+    if Km is not None:
+        print(f"\n  SPSA matches the sigma gradient's own fidelity to g_true "
+              f"(cos = {c2:.3f})\n    at K = {Km:.0f}, i.e. {2 * Km:.0f} extra "
+              f"forwards.  The sigma gradient uses 0.")
+
+    ax_k = np.logspace(0, math.log10(max(ks) * 8), 200)
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    ax.errorbar(ks, cos_mean, yerr=cos_std, fmt="o", color="tab:red", capsize=4,
+                zorder=3, label="measured: cos(SPSA averaged over K, sigma gradient)")
+    ax.plot(ax_k, c2 / np.sqrt(1.0 + v2 / ax_k), color="tab:red", lw=1.4,
+            label=f"fit c/sqrt(1+v/K):  c_inf = {c2:.3f}, v = {v2:.0f}")
+    ax.plot(ax_k, 1.0 / np.sqrt(1.0 + v1 / ax_k), color="tab:gray", lw=1.2, ls="--",
+            label=f"fit with c_inf forced to 1:  v = {v1:.0f}")
+    ax.axhline(c2, color="tab:red", lw=0.8, ls=":", alpha=0.8)
+    ax.annotate(f"c_inf = {c2:.3f}: SPSA converges HERE, not on 1.\n"
+                f"The sigma gradient is not the true gradient either.",
+                xy=(ks[0], c2), xytext=(ks[0] * 1.2, c2 + 0.04), fontsize=7,
+                color="tab:red")
+    ax.axhline(0.0, color="k", lw=0.6)
+    ax.set_xscale("log")
+    ax.set(title="SPSA spends thousands of forwards climbing to a direction\n"
+                 "the sigma gradient reads for free (and stops short of it)",
+           xlabel="SPSA budget K  (2K extra forward passes)",
+           ylabel="cosine with the sigma gradient", ylim=(-0.05, 1.05))
+    ax.legend(fontsize=8, loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.suptitle(f"noise={args.noise}, H={args.hidden_dim}, T={args.num_samples}, "
+                 f"couple_h={args.couple_h}, h={args.crossing_h}, "
+                 f"dim={r['dim']}", fontsize=9)
+    fig.tight_layout()
+    savefig(fig, args.out_dir / "fig_spsa_vs_sigma_direction.png")
+
+
+def run_eval_t_sweep(args, device) -> None:
+    """c_inf against the T that SPSA's loss is averaged over, everything else fixed.
+
+    The two rules do not estimate the same thing.  SPSA differences the loss the
+    network actually incurs,
+
+        E[L] = (E[y] - t)^2 + Var(y),   Var(y) = Var(single sample) / T,
+
+    while the sigma gradient estimates the signal term only: the identity converts
+    d zbar/d sigma, and zbar is a MEAN response, so nothing in it knows about the
+    spread of y.  That is the caveat 9.7 flagged and left open.  It is testable:
+    the variance term decays as 1/T, so if it is what separates the two, c_inf must
+    climb towards 1 as T grows.  theta, the field and the reference sigma gradient
+    are all held fixed here, so T is the only thing that moves and the sweep cannot
+    be confounded by the network being retrained per T.
+    """
+    print("=== estimand: c_inf against the evaluation T (theta and field fixed) ===")
+    ts = [int(v) for v in args.eval_t_list.split(",") if v.strip()]
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     _, x, tA, tB = make_tasks(device)
@@ -621,64 +931,162 @@ def run_compare_dir(args, device) -> None:
     n_hidden = len(net.structure) - 2
     fa, fb = init_fields(args, n_hidden, device)
     cap = Capture(net)
-    W_ema: dict = {}
+    rows = []
 
     with torch.no_grad():
-        opt = ManualOpt("adam")
-        pre = max(1, args.epochs // 5)
-        for _ in range(pre):
-            st = forward_stats(net, cap, x, tA, fa, args)
-            update_mirrors(W_ema, st, n_hidden, args.jac_ema)
-            a = jac_credit(st, W_ema, tA, n_hidden)
-            theta_step(net, opt, W_ema, [(st, a, tA)], x, n_hidden, args.lr_theta)
-        print(f"  pretrained theta for {pre} epochs, "
-              f"mse={float(((st['y'] - tA) ** 2).mean()):.5f}")
+        W_ema, mse, pre = pretrain_theta(net, cap, x, tA, fa, args, n_hidden)
+        print(f"  pretrained theta for {pre} epochs at T={args.num_samples}, "
+              f"mse={mse:.5f}")
+        g1 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                             args.n_est)
+        g2 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                             args.n_est)
+        rho = float(torch.nn.functional.cosine_similarity(g1, g2, dim=0))
+        g_sigma = 0.5 * (g1 + g2)
+        print(f"  reference sigma gradient fixed at T={args.num_samples}: "
+              f"split-half cos = {rho:.4f}")
+        for T in ts:
+            net.sampled_layer.numT = T
+            G = spsa_draws(net, x, fa, fb, tA, args, args.spsa_m)
+            _, _, v = spsa_moments(G)
+            gbar = G.mean(dim=0)
+            c = float(torch.nn.functional.cosine_similarity(gbar, g_sigma, dim=0))
+            c_inf = c * math.sqrt(1.0 + v / G.shape[0])
 
-        # the sigma gradient, averaged over a few passes to damp its own variance
-        n_est = 20
-        acc = [torch.zeros(args.hidden_dim, device=device) for _ in range(n_hidden)]
-        for _ in range(n_est):
-            st = forward_stats(net, cap, x, tA, fa, args)
-            a = jac_credit(st, W_ema, tA, n_hidden)
-            for l, g in enumerate(sigma_grad(st, a, fa, n_hidden, args.sigma_min)):
-                acc[l] += g / n_est
-        greg, _ = reg_grads(fa, fb, args)
-        g_sigma = torch.cat([(g + r).reshape(-1) for g, r in zip(acc, greg)])
+            # the same comparison, but letting the sigma gradient read T samples too.
+            # Its credit is built from ratios of T-sample covariances, which are
+            # biased at finite T however many passes are averaged, so this separates
+            # "the credit is short of samples" from "the credit is the wrong shape".
+            h1 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                                 args.n_est)
+            h2 = sigma_reference(net, cap, x, tA, fa, fb, W_ema, args, n_hidden,
+                                 args.n_est)
+            rho_T = float(torch.nn.functional.cosine_similarity(h1, h2, dim=0))
+            g_sig_T = 0.5 * (h1 + h2)
+            c_T = float(torch.nn.functional.cosine_similarity(gbar, g_sig_T, dim=0))
+            c_inf_T = c_T * math.sqrt(1.0 + v / G.shape[0])
 
-        # SPSA at each budget, plus a one-draw baseline repeated for a mean +- std
-        cos_mean, cos_std = [], []
-        for K in ks:
-            vals = []
-            for _ in range(8):                       # 8 independent budgets of K
-                tot = [torch.zeros(args.hidden_dim, device=device)
-                       for _ in range(n_hidden)]
-                for _ in range(K):
-                    for l, g in enumerate(spsa_direction(net, x, fa, fb, tA, True,
-                                                         args)):
-                        tot[l] += g / K
-                g_spsa = torch.cat([g.reshape(-1) for g in tot])
-                vals.append(float(torch.nn.functional.cosine_similarity(
-                    g_spsa, g_sigma, dim=0)))
-            cos_mean.append(float(np.mean(vals)))
-            cos_std.append(float(np.std(vals)))
-            print(f"  K = {K:4d}  ({2 * K:5d} extra forwards)   "
-                  f"cos(SPSA_K, sigma_grad) = {cos_mean[-1]:.3f} +- {cos_std[-1]:.3f}")
+            rows.append({"T": T, "v": v, "c_inf": c_inf,
+                         "c_dis": c_inf / math.sqrt(max(rho, 1e-6)),
+                         "c_matched": c_inf_T / math.sqrt(max(rho_T, 1e-6)),
+                         "rho_T": rho_T})
+            print(f"  T = {T:5d}   v = {v:8.1f}   c_inf = {c_inf:.4f}  "
+                  f"(disatt {rows[-1]['c_dis']:.4f})   "
+                  f"sigma_grad also at T: {rows[-1]['c_matched']:.4f}  "
+                  f"(split-half {rho_T:.4f})")
+        net.sampled_layer.numT = args.num_samples
     cap.remove()
 
-    fig, ax = plt.subplots(figsize=(7.5, 5))
-    ax.errorbar(ks, cos_mean, yerr=cos_std, fmt="o-", color="tab:red", capsize=4,
-                label="cos(SPSA averaged over K, sigma gradient)")
-    ax.axhline(0.0, color="k", lw=0.6)
-    ax.set_xscale("log")
-    ax.set(title="SPSA converges on the direction the sigma gradient reads for free",
-           xlabel="SPSA budget K  (2K extra forward passes)",
-           ylabel="cosine with the sigma gradient")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.3)
-    fig.suptitle(f"noise={args.noise}, H={args.hidden_dim}, T={args.num_samples}, "
-                 f"couple_h={args.couple_h}, h={args.crossing_h}", fontsize=9)
+    print("\n  If the Var(y) term were the whole gap, c_inf -> 1 as T grows.")
+    print("  Where c_inf plateaus instead is the sigma gradient's own directional\n"
+          "  bias against the signal term it is actually estimating.  The last\n"
+          "  column gives that estimator the same T, so what survives there is\n"
+          "  structural: the shape of the cov_jac credit, not a shortage of samples.")
+
+    ts_a = np.array([q["T"] for q in rows], dtype=float)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    axes[0].semilogx(ts_a, [q["c_dis"] for q in rows], "o-", color="tab:red", base=2,
+                     label="c_inf, sigma gradient fixed at the training T")
+    axes[0].semilogx(ts_a, [q["c_matched"] for q in rows], "s--", color="tab:purple",
+                     base=2, label="c_inf, sigma gradient given the same T")
+    axes[0].axhline(1.0, color="k", lw=0.8, ls="--", label="agreement in the limit")
+    axes[0].set(title="The gap is not the variance term: c_inf does not climb to 1",
+                xlabel="T averaged into SPSA's loss  (Var(y) ~ 1/T)",
+                ylabel="c_inf", ylim=(0.0, 1.05))
+    axes[1].loglog(ts_a, [q["v"] for q in rows], "o-", color="tab:orange", base=2,
+                   label="v = tr(Sigma)/|g|^2")
+    axes[1].axhline(2 * args.hidden_dim + 1, color="tab:gray", lw=1.0, ls="-.",
+                    label="dim + 1 (noiseless-loss floor)")
+    axes[1].set(title="SPSA's variance does fall with T (its loss gets quieter)",
+                xlabel="T averaged into SPSA's loss", ylabel="v")
+    for ax in axes:
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+    fig.suptitle(f"noise={args.noise}, H={args.hidden_dim}, couple_h={args.couple_h}, "
+                 f"draws={args.spsa_m}, crn={args.spsa_crn}", fontsize=9)
     fig.tight_layout()
-    savefig(fig, args.out_dir / "fig_spsa_vs_sigma_direction.png")
+    savefig(fig, args.out_dir / "fig_cinf_vs_eval_T.png")
+
+
+def run_dim_sweep(args, device) -> None:
+    """v against the field dimension.
+
+    SPSA replaces a d-dimensional gradient with one scalar times a random direction,
+    so its variance carries the whole dimension: with a noiseless loss the algebra
+    gives tr(Sigma)/|g|^2 = d + 1 exactly, and loss noise inflates that by a factor
+    but leaves it proportional to d.  The sigma gradient reads every component from
+    passes it was making anyway, so its cost does not move with d at all.  If v ~ d
+    holds, the budget gap is not a constant factor to be tuned away: it widens with
+    the size of the field being learned.
+    """
+    print("=== scaling: SPSA's variance v against the field dimension ===")
+    hs = [int(v) for v in args.dim_list.split(",") if v.strip()]
+    all_ks = [int(v) for v in args.spsa_k.split(",") if v.strip()]
+    rows = []
+    m_full = args.spsa_m
+    for H in hs:
+        args.hidden_dim = H
+        # |g|^2 is recovered by subtracting tr(Sigma)/m from |mean|^2, so the draws
+        # must outnumber v or that subtraction eats the signal and v is overstated.
+        # v grows with the dimension, so the budget has to grow with it too.
+        args.spsa_m = int(args.sweep_m * max(1.0, (2 * H) / 64.0))
+        ks = [k for k in all_ks if k <= args.spsa_m // 2]
+        r = measure_direction(args, device)
+        gen = torch.Generator(device=r["G"].device).manual_seed(args.seed + 1)
+        cos_mean, _ = cos_curve(r["G"], r["g_sigma"], ks, 16, gen)
+        c2, v2, rms2 = fit_cos_curve(ks, cos_mean)
+        rows.append({"H": H, "dim": r["dim"], "v_fit": v2, "c_fit": c2,
+                     "v_moment": r["v_moment"], "c_moment": r["c_moment"],
+                     "split_half": r["split_half"], "rms": rms2,
+                     "mse": r["pretrain_mse"], "m": args.spsa_m,
+                     "v_over_m": r["v_moment"] / args.spsa_m})
+        print(f"  H = {H:4d}  dim = {r['dim']:4d}  m = {args.spsa_m:6d}   "
+              f"v_moment = {r['v_moment']:8.1f}   v_fit = {v2:8.1f}   "
+              f"c_inf = {c2:.3f}   (dim+1 = {r['dim'] + 1}, "
+              f"v/m = {r['v_moment'] / args.spsa_m:.2f})")
+    args.spsa_m = m_full
+    print("  v/m must stay well under 1 for v_moment to be trustworthy.")
+
+    dims = np.array([q["dim"] for q in rows], dtype=float)
+    vmom = np.array([q["v_moment"] for q in rows], dtype=float)
+    vfit = np.array([q["v_fit"] for q in rows], dtype=float)
+    slope = float((dims * vmom).sum() / (dims ** 2).sum())     # v = slope * dim
+    resid = vmom - slope * dims
+    print(f"\n  v_moment = {slope:.2f} * dim   "
+          f"(rms residual {float(np.sqrt((resid ** 2).mean())):.1f})")
+    print(f"  ratio v/(dim+1) per width: "
+          + ", ".join(f"{q['v_moment'] / (q['dim'] + 1):.2f}" for q in rows))
+    print("  The floor is v = dim+1 (noiseless loss); the excess is the loss's own\n"
+          "  sampling noise entering through the SPSA difference quotient.")
+    print("\n  extra forwards for SPSA to match the sigma gradient's fidelity:")
+    for q in rows:
+        Km = matching_budget(q["c_fit"], q["v_moment"])
+        s = f"{2 * Km:10.0f}" if Km is not None else "         -"
+        print(f"    dim = {q['dim']:4d}   {s}   (sigma gradient: 0)")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    axes[0].plot(dims, vmom, "o-", color="tab:red", label="v from the draws (moments)")
+    axes[0].plot(dims, vfit, "s--", color="tab:orange", alpha=0.8,
+                 label="v from the cos(K) fit")
+    axes[0].plot(dims, slope * dims, ":", color="tab:red", alpha=0.6,
+                 label=f"v = {slope:.1f} * dim")
+    axes[0].plot(dims, dims + 1.0, "-.", color="tab:gray",
+                 label="v = dim + 1 (noiseless-loss floor)")
+    axes[0].set(title="SPSA's variance carries the whole field dimension",
+                xlabel="field dimension d", ylabel="v = tr(Sigma) / |g|^2")
+    axes[1].plot(dims, [2 * (matching_budget(q["c_fit"], q["v_moment"]) or np.nan)
+                        for q in rows], "o-", color="tab:red",
+                 label="SPSA: forwards to match the sigma gradient")
+    axes[1].axhline(0.0, color="tab:blue", lw=1.6, label="sigma gradient: 0")
+    axes[1].set(title="Cost of reaching the sigma gradient's fidelity",
+                xlabel="field dimension d", ylabel="extra forward passes")
+    for ax in axes:
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+    fig.suptitle(f"noise={args.noise}, T={args.num_samples}, "
+                 f"couple_h={args.couple_h}, draws={args.sweep_m}", fontsize=9)
+    fig.tight_layout()
+    savefig(fig, args.out_dir / "fig_spsa_variance_vs_dim.png")
 
 
 # ============================================================
@@ -739,6 +1147,12 @@ def main() -> None:
         return
     if args.compare_dir:
         run_compare_dir(args, device)
+        return
+    if args.dim_sweep:
+        run_dim_sweep(args, device)
+        return
+    if args.eval_t_sweep:
+        run_eval_t_sweep(args, device)
         return
 
     _, x, tA, tB = make_tasks(device)
