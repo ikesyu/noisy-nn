@@ -149,6 +149,8 @@ class CovJacTrainer:
         self.cap = Capture(net)
         self.opt = ManualOpt(opt)
         self.W = {}                      # 重みミラー（EMA + Kolen-Pollack 追跡）
+        self.grad_masks = None           # {l: (W_mask, b_mask)}: 0 成分は凍結
+                                         # （§12.9 読み出し共有で過去領域の入力側を保護）
         self.losses = []
 
     def step(self) -> float:
@@ -186,6 +188,9 @@ class CovJacTrainer:
                 delta = a[l].unsqueeze(1) * slope[l]     # [N, T, H]
                 gW = torch.einsum("nto,nti->oi", delta, z_prev[l]) / (N * T)
                 gb = delta.mean(dim=(0, 1))
+                if self.grad_masks is not None and l in self.grad_masks:
+                    mW, mb = self.grad_masks[l]
+                    gW, gb = gW * mW, gb * mb
                 steps[l] = self.opt.update(f"w{l}", net.fcs[l].weight, gW, self.lr)
                 self.opt.update(f"b{l}", net.fcs[l].bias, gb, self.lr)
 
