@@ -53,57 +53,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import fncl_driver as fncl  # noqa: E402
 from fncl_driver import save_json, savefig, write_text  # noqa: E402
 import consolidation_poc as poc  # noqa: E402
-import consolidation_soft as csoft  # noqa: E402
 import consolidation_recruit as crc  # noqa: E402
-
-
-# ============================================================
-# タスクコンテキスト（per-task 場 + 読み出し + トレーナ）
-# ============================================================
-class Ctx:
-    def __init__(self, net, x, support: dict, target, sigma0, h0, wout, b_out,
-                 tol, args):
-        self.target = target
-        self.tol = tol
-        H = net.sigma_vecs[0].shape[0]
-        self.sig = [torch.zeros(H) for _ in (0, 1)]
-        self.h = [torch.full((H,), poc.H_DEAD) for _ in (0, 1)]
-        for l in (0, 1):
-            for k in support[l]:
-                self.sig[l][k] = sigma0
-                self.h[l][k] = h0
-        self.support = {l: sorted(support[l]) for l in (0, 1)}
-        self.wout = wout.clone()
-        self.b_out = b_out.clone()
-        t = torch.tensor(target, device=x.device).unsqueeze(1)
-        self.trainer = poc.CovJacTrainer(net, x, t, lr=args.ft_lr,
-                                         opt=args.opt, jac_ema=args.jac_ema)
-
-    def activate(self, net):
-        for l in (0, 1):
-            net.sigma_vecs[l] = self.sig[l].to(net.sigma_vecs[l].device)
-            net.h_vecs[l] = self.h[l].to(net.h_vecs[l].device)
-        net.fcs[2].weight.data.copy_(self.wout)
-        net.fcs[2].bias.data.copy_(self.b_out)
-
-    def deactivate(self, net):
-        self.wout = net.fcs[2].weight.data.clone()
-        self.b_out = net.fcs[2].bias.data.clone()
-
-    def step(self, net):
-        self.activate(net)
-        loss = self.trainer.step()
-        self.deactivate(net)
-        return loss
-
-    def eval(self, net, x, passes: int = 16):
-        self.activate(net)
-        pred = fncl.predict(net, x, passes=passes)
-        return float(np.mean((pred - self.target) ** 2)), pred
-
-
-def overlaps(sup_a: dict, sup_b: dict) -> int:
-    return sum(len(set(sup_a[l]) & set(sup_b[l])) for l in (0, 1))
+# per-task 場つきのタスクコンテキストと重なり測度は consolidation_lib にある。
+from consolidation_lib import (  # noqa: E402
+    TaskCtx, freeze_masks, overlaps, region_drift, region_snapshot)
 
 
 # ============================================================
@@ -115,19 +68,17 @@ def run_arm(arm: str, net0, x, registry, y3_new, args, device):
     H = args.hidden_dim
     r_sin, r_cos, r3 = registry
 
-    ctx3 = Ctx(net, x, r3["support"], y3_new, r3["sigma0"], r3["h0"],
-               r3["wout"], r3["b_out"], r3["tol"], args)
-    ctx_sin = Ctx(net, x, r_sin["support"], r_sin["target"], r_sin["sigma0"],
-                  r_sin["h0"], r_sin["wout"], r_sin["b_out"], r_sin["tol"],
-                  args)
-    ctx_cos = Ctx(net, x, r_cos["support"], r_cos["target"], r_cos["sigma0"],
-                  r_cos["h0"], r_cos["wout"], r_cos["b_out"], r_cos["tol"],
-                  args)
+    ctx3 = TaskCtx.from_registry(net, x, r3, args, support=r3["support"],
+                                 target=y3_new)
+    ctx_sin = TaskCtx.from_registry(net, x, r_sin, args,
+                                    support=r_sin["support"])
+    ctx_cos = TaskCtx.from_registry(net, x, r_cos, args,
+                                    support=r_cos["support"])
 
     if arm == "frozen":
         past = {l: sorted(set(r_sin["region"][l]) | set(r_cos["region"][l]))
                 for l in (0, 1)}
-        ctx3.trainer.grad_masks = csoft.freeze_masks(H, past, device)
+        ctx3.trainer.grad_masks = freeze_masks(H, past, device)
     # 案5: リハーサル対象 = 場が交わる過去タスクのみ。full: 無条件に全過去タスク
     if arm == "rehearsal":
         rehearse = [c for c in (ctx_sin, ctx_cos)
@@ -137,7 +88,7 @@ def run_arm(arm: str, net0, x, registry, y3_new, args, device):
     else:
         rehearse = []
 
-    cos_snap = csoft.region_snapshot(net, r_cos["region"])
+    cos_snap = region_snapshot(net, r_cos["region"])
     steps = {"task3": 0, "sin": 0, "cos": 0}
     holds = 0
     tol_loop = {}
@@ -170,7 +121,7 @@ def run_arm(arm: str, net0, x, registry, y3_new, args, device):
     mse3, pred3 = ctx3.eval(net, x)
     mse_sin, pred_sin = ctx_sin.eval(net, x)
     mse_cos, _ = ctx_cos.eval(net, x)
-    cos_drift = csoft.region_drift(net, r_cos["region"], cos_snap)
+    cos_drift = region_drift(net, r_cos["region"], cos_snap)
     total = steps["task3"] + steps["sin"] + steps["cos"]
     tl = tol_loop.get(id(ctx_sin))
     print(f"  [{arm}] MSE: task3'={mse3:.5f} sin={mse_sin:.5f} "

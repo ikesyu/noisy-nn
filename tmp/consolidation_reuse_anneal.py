@@ -49,33 +49,17 @@ import fncl_driver as fncl  # noqa: E402
 from fncl_driver import save_json, savefig, write_text  # noqa: E402
 import consolidation_poc as poc  # noqa: E402
 import consolidation_soft as csoft  # noqa: E402
-
-
-# ============================================================
-# ρ つき場設定（動員ダイヤル §4.6: σ = ρσ0, h = h0/ρ）
-# ============================================================
-def set_field_rho(net, own: dict, voc: dict, sigma0: float, h0: float,
-                  rho: float) -> None:
-    """own を全動員 (ρ=1)、voc を部分動員 (ρ)、他を休眠にする."""
-    H = net.sigma_vecs[0].shape[0]
-    for l in (0, 1):
-        sig = torch.zeros(H)
-        hv = torch.full((H,), poc.H_DEAD)
-        for k in own[l]:
-            sig[k] = sigma0
-            hv[k] = h0
-        for k in voc[l]:
-            sig[k] = rho * sigma0
-            hv[k] = h0 / rho
-        net.sigma_vecs[l] = sig.to(net.sigma_vecs[l].device)
-        net.h_vecs[l] = hv.to(net.h_vecs[l].device)
+from consolidation_lib import (  # noqa: E402,F401
+    anneal_unit, eval_with_descriptor, freeze_masks, region_drift,
+    region_snapshot, set_field_rho, trainer_rollback, trainer_state,
+    unit_score, vocab_energy, zero_cross_columns)
 
 
 # ============================================================
 # anneal-until-stop（語彙 L2 も候補に含む拡張版）
 # ============================================================
 def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
-                            grad_masks, vocab: dict):
+                            grad_masks, vocab: dict, share_l1: bool = False):
     """自前 (L1, L2) + 語彙 L2 の 3 グループを貪欲 min S_k でアニールする.
 
     グループ = (層, 種別): (0,'own'), (1,'own'), (1,'voc')。停止則は
@@ -101,23 +85,15 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
             # 補償が実際に流せる基底: L1 は自前 L1 のみ（語彙 L1 への交差列は
             # 凍結 0）。L2 は自前 L2 + 生存語彙 L2（読み出しが両方へ張れる）。
             if l == 0:
-                basis_all = pools[(0, "own")]
+                basis_all = pools[(0, "own")] + (list(vocab[0]) if share_l1
+                                                 else [])
             else:
                 basis_all = pools[(1, "own")] + pools[(1, "voc")]
             best_g = None
             for k in pools[g]:
-                w2 = float((Wn[:, k] ** 2).sum())
-                rest = [j for j in basis_all if j != k]
-                if w2 == 0.0:
-                    S = 0.0
-                elif not rest:
-                    continue
-                else:
-                    _, _, resid = poc.ridge_fit(zbar[l][:, rest],
-                                                zbar[l][:, k], args.ridge)
-                    S = (w2 * float((resid ** 2).sum())
-                         / (float((zbar[l][:, k] ** 2).sum()) + poc.EPS))
-                if best_g is None or S < best_g[0]:
+                S = unit_score(zbar[l], k, [j for j in basis_all if j != k],
+                               float((Wn[:, k] ** 2).sum()), args.ridge)
+                if S is not None and (best_g is None or S < best_g[0]):
                     best_g = (S, k)
             if best_g is None:
                 open_groups.discard(g)
@@ -128,22 +104,13 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
         g = min(scored, key=lambda gg: scored[gg][0])
         l, kind = g
         k = scored[g][1]
-        ck_net, ck_tr = poc.checkpoint(net), csoft.trainer_state(trainer)
-        steps = 0
-        while True:
-            net.sigma_vecs[l][k] *= args.anneal_alpha
-            if l >= 1:
-                net.h_vecs[l][k] = net.h_vecs[l][k] / args.anneal_alpha
-            trainer.run(args.epochs_per_step)
-            h = 0
-            while trainer.ema() > tol and h < args.max_holds:
-                trainer.run(args.epochs_per_step)
-                h += 1
-            holds_total += h
-            steps += 1
-            act = float(trainer.cap.z[l][:, :, k].mean())
-            if act < args.snap_act or steps >= args.max_anneal_steps:
-                break
+        ck_net, ck_tr = poc.checkpoint(net), trainer_state(trainer)
+        holds_total += anneal_unit(
+            net, l, k, lambda _kind: trainer.run(args.epochs_per_step),
+            over_tol=lambda: trainer.ema() > tol,
+            read_act=lambda: float(trainer.cap.z[l][:, :, k].mean()),
+            alpha=args.anneal_alpha, max_holds=args.max_holds,
+            snap_act=args.snap_act, max_steps=args.max_anneal_steps)
         poc.kill_unit(net, l, k)
         rec = 0
         while trainer.ema() > tol and rec < args.stop_recovery:
@@ -151,7 +118,7 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
             rec += 1
         if trainer.ema() > tol:
             poc.restore(net, ck_net)
-            csoft.trainer_rollback(trainer, ck_tr)
+            trainer_rollback(trainer, ck_tr)
             open_groups.discard(g)
             print(f"    [stop] {g} unit {k}: 吸収不能 -> 巻き戻し "
                   f"(残 = {len(pools[g])} で確定)")
@@ -182,10 +149,10 @@ def run_sequence_prune(seed: int, args, device, tasks, x):
               f"vocab L2 {len(vocab[1])}, rho_init={args.rho_init}) =====")
         net.fcs[2].weight.data.zero_()
         net.fcs[2].bias.data.zero_()
-        csoft.zero_cross_columns(net, past)
+        zero_cross_columns(net, past)
         set_field_rho(net, free, vocab, args.sigma, args.crossing_h,
                       args.rho_init)
-        masks = (csoft.freeze_masks(H, past, device)
+        masks = (freeze_masks(H, past, device)
                  if (past[0] or past[1]) else None)
 
         t = torch.tensor(target, device=device).unsqueeze(1)
@@ -217,10 +184,10 @@ def run_sequence_prune(seed: int, args, device, tasks, x):
              "h0": float(args.crossing_h),
              "wout": net.fcs[2].weight.data.clone(),
              "b_out": net.fcs[2].bias.data.clone(),
-             "snap": csoft.region_snapshot(net, region), "tol": tol,
+             "snap": region_snapshot(net, region), "tol": tol,
              "holds": holds, "anneal_epochs": len(losses)}
         registry.append(r)
-        pred = csoft.eval_with_descriptor(net, x, r)
+        pred = eval_with_descriptor(net, x, r)
         r["mse_at_consolidation"] = float(np.mean((pred - target) ** 2))
         kept_by_src = {s["name"]: sorted(k for k in voc_alive
                                          if k in s["region"][1])
@@ -239,13 +206,14 @@ def run_sequence_prune(seed: int, args, device, tasks, x):
     out = {"tasks": [], "cross": np.zeros((K, K)), "preds": [],
            "registry": registry}
     for i, r in enumerate(registry):
-        pred = csoft.eval_with_descriptor(net, x, r)
+        pred = eval_with_descriptor(net, x, r)
         out["preds"].append(pred)
         mse = float(np.mean((pred - r["target"]) ** 2))
-        drift = csoft.region_drift(net, r["region"], r["snap"])
+        drift = region_drift(net, r["region"], r["snap"])
         for j in range(K):
             out["cross"][i, j] = float(np.mean((pred - registry[j]["target"]) ** 2))
-        share, by_source = csoft.vocab_energy(net, x, r, registry, args)
+        share, by_source = vocab_energy(net, x, r, registry,
+                                        passes=args.stat_passes)
         n_voc2 = len(r["support"][1]) - len(r["region"][1])
         out["tasks"].append({
             "name": r["name"],

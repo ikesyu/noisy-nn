@@ -58,79 +58,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import fncl_driver as fncl  # noqa: E402
 from fncl_driver import save_json, savefig, write_text  # noqa: E402
 import consolidation_poc as poc  # noqa: E402
-import consolidation_soft as csoft  # noqa: E402
 import consolidation_recruit as crc  # noqa: E402
-
-
-# ============================================================
-# タスクコンテキスト: 読み出し（タスク記述子）を保持・切替える。
-# 場は Phase B0 以降タスク間で共有される（net.sigma_vecs / h_vecs が単一の実体）。
-# ============================================================
-class TaskCtx:
-    def __init__(self, net, x, r, args):
-        self.name = r["name"]
-        self.target = r["target"]
-        self.tol = r["tol"]
-        self.wout = r["wout"].clone()
-        self.b_out = r["b_out"].clone()
-        t = torch.tensor(r["target"], device=x.device).unsqueeze(1)
-        self.trainer = poc.CovJacTrainer(net, x, t, lr=args.ft_lr,
-                                         opt=args.opt, jac_ema=args.jac_ema)
-
-    def activate(self, net):
-        net.fcs[2].weight.data.copy_(self.wout)
-        net.fcs[2].bias.data.copy_(self.b_out)
-
-    def deactivate(self, net):
-        self.wout = net.fcs[2].weight.data.clone()
-        self.b_out = net.fcs[2].bias.data.clone()
-
-    def step(self, net):
-        self.activate(net)
-        loss = self.trainer.step()
-        self.deactivate(net)
-        return loss
-
-    def eval_mse(self, net, x, passes: int = 16):
-        self.activate(net)
-        pred = fncl.predict(net, x, passes=passes)
-        return float(np.mean((pred - self.target) ** 2)), pred
-
-
-def joint_round(net, order) -> list:
-    """order の各タスクを 1 step ずつ交互に学習する（リハーサル込み補償）."""
-    return [ctx.step(net) for ctx in order]
-
-
-def any_over_tol(ctxs) -> bool:
-    return any(ctx.trainer.ema() > ctx.tol for ctx in ctxs)
-
-
-def joint_checkpoint(net, ctxs):
-    return (poc.checkpoint(net),
-            [(ctx.wout.clone(), ctx.b_out.clone(),
-              csoft.trainer_state(ctx.trainer)) for ctx in ctxs])
-
-
-def joint_restore(net, ctxs, ck):
-    poc.restore(net, ck[0])
-    for ctx, st in zip(ctxs, ck[1]):
-        ctx.wout = st[0].clone()
-        ctx.b_out = st[1].clone()
-        csoft.trainer_rollback(ctx.trainer, st[2])
-
-
-def alive(net, l: int):
-    return [k for k in range(net.sigma_vecs[l].shape[0])
-            if float(net.sigma_vecs[l][k]) > 0]
-
-
-def kill_everywhere(net, ctxs, l: int, k: int):
-    """union からの大域的な離脱: 共有場 + 全タスクの読み出し列."""
-    poc.kill_unit(net, l, k)                    # σ=0, h 番兵, 次層列 0
-    if l == 1:
-        for ctx in ctxs:
-            ctx.wout[:, k] = 0.0
+# タスクコンテキスト（読み出し記述子の切替え）と共同アニールの部品は
+# consolidation_lib にある。場は Phase B0 以降タスク間で共有される
+# （net.sigma_vecs / h_vecs が単一の実体; TaskCtx は support=None で使う）。
+from consolidation_lib import (  # noqa: E402
+    TaskCtx, alive, anneal_unit, any_over_tol, joint_checkpoint,
+    joint_restore, joint_round, kill_everywhere, unit_score)
 
 
 # ============================================================
@@ -172,17 +106,9 @@ def union_anneal(net, x, ctxs, args):
                 else:
                     w2 = (float((net.fcs[1].weight.data[rows][:, k] ** 2)
                                 .sum()) if rows else 0.0)
-                rest = [j for j in basis_all if j != k]
-                if w2 == 0.0:
-                    S = 0.0
-                elif not rest:
-                    continue
-                else:
-                    _, _, resid = poc.ridge_fit(zbar[l][:, rest],
-                                                zbar[l][:, k], args.ridge)
-                    S = (w2 * float((resid ** 2).sum())
-                         / (float((zbar[l][:, k] ** 2).sum()) + poc.EPS))
-                if best_l is None or S < best_l[0]:
+                S = unit_score(zbar[l], k, [j for j in basis_all if j != k],
+                               w2, args.ridge)
+                if S is not None and (best_l is None or S < best_l[0]):
                     best_l = (S, k)
             if best_l is None:
                 open_layers.discard(l)
@@ -193,23 +119,17 @@ def union_anneal(net, x, ctxs, args):
         l = min(scored, key=lambda ll: scored[ll][0])
         k = scored[l][1]
         ck = joint_checkpoint(net, ctxs)
-        steps = 0
-        while True:
-            net.sigma_vecs[l][k] *= args.anneal_alpha
-            if l >= 1:
-                net.h_vecs[l][k] = net.h_vecs[l][k] / args.anneal_alpha
+
+        def run_block(kind):
             for _ in range(args.epochs_per_step):
                 record(ctxs, joint_round(net, ctxs))
-            h = 0
-            while any_over_tol(ctxs) and h < args.max_holds:
-                for _ in range(args.epochs_per_step):
-                    record(ctxs, joint_round(net, ctxs))
-                h += 1
-            holds_total += h
-            steps += 1
-            act = float(ctxs[-1].trainer.cap.z[l][:, :, k].mean())
-            if act < args.snap_act or steps >= args.max_anneal_steps:
-                break
+
+        holds_total += anneal_unit(
+            net, l, k, run_block,
+            over_tol=lambda: any_over_tol(ctxs),
+            read_act=lambda: float(ctxs[-1].trainer.cap.z[l][:, :, k].mean()),
+            alpha=args.anneal_alpha, max_holds=args.max_holds,
+            snap_act=args.snap_act, max_steps=args.max_anneal_steps)
         kill_everywhere(net, ctxs, l, k)
         rec = 0
         while any_over_tol(ctxs) and rec < args.stop_recovery:
@@ -290,9 +210,9 @@ def main():
                 hv[k] = h0
             net.sigma_vecs[l] = sig.to(device)
             net.h_vecs[l] = hv.to(device)
-        ctxs = [TaskCtx(net, x, r, args) for r in registry]
+        ctxs = [TaskCtx.from_registry(net, x, r, args) for r in registry]
         for i, ctx in enumerate(ctxs):
-            m, _ = ctx.eval_mse(net, x)
+            m, _ = ctx.eval(net, x)
             print(f"  [B0] {ctx.name}: MSE on shared union field = {m:.5f} "
                   f"(phase A {mse_a[i]:.5f}, tol {ctx.tol:.4f})")
 
@@ -319,7 +239,7 @@ def main():
         # ---------------- 最終評価 ----------------
         mse_b, preds = [], []
         for ctx in ctxs:
-            m, pred = ctx.eval_mse(net, x)
+            m, pred = ctx.eval(net, x)
             mse_b.append(m)
             preds.append(pred)
             print(f"  [final] {ctx.name}: MSE={m:.5f} (tol={ctx.tol:.4f})")

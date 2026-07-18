@@ -46,36 +46,29 @@ import matplotlib.pyplot as plt  # noqa: E402
 import fncl_driver as fncl  # noqa: E402
 from fncl_driver import save_json, savefig, write_text  # noqa: E402
 import consolidation_poc as poc  # noqa: E402
-import consolidation_soft as csoft  # noqa: E402
 import consolidation_reuse_anneal as cra  # noqa: E402
+from consolidation_lib import (  # noqa: E402
+    eval_with_descriptor, freeze_masks, probe_tuning_corr, region_drift,
+    region_snapshot, set_field_rho, vocab_energy, zero_cross_columns)
 
 
-# ============================================================
-# プローブ: 語彙チューニング曲線と新目標の相関（学習なし）
-# ============================================================
 def probe_vocab(net, x, target, vocab: dict, args):
-    """語彙だけを一時動員し、L2 語彙の |corr_x(zbar_k, y_new)| を返す."""
-    set_back = ([s.clone() for s in net.sigma_vecs],
-                [h.clone() for h in net.h_vecs])
-    cra.set_field_rho(net, {0: [], 1: []}, vocab, args.sigma, args.crossing_h,
-                      1.0)
-    _, zbar = poc.collect_stats(net, x, passes=args.stat_passes)
-    t = torch.tensor(target, device=x.device)
-    tc = t - t.mean()
-    scores = {}
-    for k in vocab[1]:
-        zk = zbar[1][:, k]
-        zc = zk - zk.mean()
-        denom = float(zc.norm()) * float(tc.norm())
-        scores[k] = abs(float((zc @ tc))) / (denom + poc.EPS)
-    net.sigma_vecs, net.h_vecs = set_back
-    return scores
+    """語彙だけを一時動員し、L2 語彙の |corr_x(zbar_k, y_new)| を返す
+    (§12.9 案3 の類似度プローブ; 本体は consolidation_lib.probe_tuning_corr)."""
+    return probe_tuning_corr(net, x, target, vocab, args.sigma,
+                             args.crossing_h, passes=args.stat_passes)
 
 
 # ============================================================
 # 逐次実行（recruit アーム）
 # ============================================================
-def run_sequence_recruit(seed: int, args, device, tasks, x):
+def run_sequence_recruit(seed: int, args, device, tasks, x,
+                         cleanup_thr: float = None, share_l1: bool = False):
+    """案3 の逐次格納。cleanup_thr を与えると、格納に失敗したタスクの
+    残骸領域を kill して free へ戻す（§12.9.8 の「掃除」）。share_l1=True は
+    二層共有（§12.9.9 案A）: 過去 L1 全体を凍結基底として常時動員し、
+    新タスクの L2 行がそれを読める（交差列を学習可能にする）。忘却は
+    どちらでも厳密ゼロ。None / False なら従来動作."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     H = args.hidden_dim
@@ -91,7 +84,7 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
               f"vocab L2 {len(vocab_all[1])}) =====")
         net.fcs[2].weight.data.zero_()
         net.fcs[2].bias.data.zero_()
-        csoft.zero_cross_columns(net, past)
+        zero_cross_columns(net, past)
 
         # --- 類似度プローブ -> 動員する語彙の事前選択 -------------------
         scores = (probe_vocab(net, x, target, vocab_all, args)
@@ -102,6 +95,8 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
                    if any(k in recruited for k in s["region"][1])]
         voc = {0: sorted({k for s in src_rec for k in s["region"][0]}),
                1: recruited}
+        if share_l1:
+            voc = {0: sorted(past[0]), 1: recruited}   # L1 基底は常時全動員
         if scores:
             by_src = {s["name"]: [(k, round(scores[k], 3))
                                   for k in s["region"][1]] for s in registry}
@@ -109,8 +104,8 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
             print(f"    recruited (>= {args.recruit_thresh}): {recruited} "
                   f"-> mobilised vocab {len(voc[0])}+{len(voc[1])}")
 
-        cra.set_field_rho(net, free, voc, args.sigma, args.crossing_h, 1.0)
-        masks = (csoft.freeze_masks(H, past, device)
+        set_field_rho(net, free, voc, args.sigma, args.crossing_h, 1.0)
+        masks = (freeze_masks(H, past, device, share_l1=share_l1)
                  if (past[0] or past[1]) else None)
 
         # --- 初期学習（空き + 動員語彙のみ） ---------------------------
@@ -130,12 +125,14 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
         # --- anneal-until-stop（自前 + 動員済み語彙が候補; 安全網） -----
         losses, holds, voc_alive = cra.anneal_until_stop_prune(
             net, x, target, tol, args, eligible=free, grad_masks=masks,
-            vocab=voc)
+            vocab=voc, share_l1=share_l1)
         region = {l: [k for k in free[l] if float(net.sigma_vecs[l][k]) > 0]
                   for l in (0, 1)}
         src_alive = [s for s in registry
                      if any(k in voc_alive for k in s["region"][1])]
         voc_l1 = sorted({k for s in src_alive for k in s["region"][0]})
+        if share_l1:
+            voc_l1 = sorted(past[0])       # 交差重みが過去 L1 全体に張れる
         support = {0: sorted(region[0] + voc_l1),
                    1: sorted(region[1] + sorted(voc_alive))}
         r = {"name": name, "target": target, "region": region,
@@ -143,10 +140,12 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
              "h0": float(args.crossing_h),
              "wout": net.fcs[2].weight.data.clone(),
              "b_out": net.fcs[2].bias.data.clone(),
-             "snap": csoft.region_snapshot(net, region), "tol": tol,
+             "snap": region_snapshot(net, region, cols=support[0]),
+             "snap_cols": support[0],
+             "tol": tol,
              "holds": holds, "anneal_epochs": len(losses)}
         registry.append(r)
-        pred = csoft.eval_with_descriptor(net, x, r)
+        pred = eval_with_descriptor(net, x, r)
         r["mse_at_consolidation"] = float(np.mean((pred - target) ** 2))
         r["probe_scores"] = {str(k): scores[k] for k in scores}
         r["recruited"] = recruited
@@ -159,6 +158,19 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
               f"recruited {len(recruited)} -> kept {len(voc_alive)}; "
               f"support {len(support[0])}+{len(support[1])}; "
               f"MSE={r['mse_at_consolidation']:.5f} (tol={tol:.4f})")
+        if (cleanup_thr is not None
+                and r["mse_at_consolidation"] > cleanup_thr):
+            # 掃除: 失敗タスクの残骸を回収（kill して free に残す）
+            for l in (0, 1):
+                for k in region[l]:
+                    poc.kill_unit(net, l, k)
+            print(f"    [cleanup] 格納失敗 (MSE > {cleanup_thr}) -> "
+                  f"L1 {len(region[0])} + L2 {len(region[1])} を回収")
+            region = {0: [], 1: []}
+            r["region"] = region
+            r["support"] = {0: voc_l1, 1: sorted(voc_alive)}
+            r["snap"] = region_snapshot(net, region, cols=r["support"][0])
+            r["snap_cols"] = r["support"][0]
         past = {l: past[l] + region[l] for l in (0, 1)}
         free = {l: [k for k in free[l] if k not in region[l]] for l in (0, 1)}
 
@@ -166,11 +178,13 @@ def run_sequence_recruit(seed: int, args, device, tasks, x):
     K = len(tasks)
     out = {"tasks": [], "preds": [], "registry": registry, "net": net}
     for i, r in enumerate(registry):
-        pred = csoft.eval_with_descriptor(net, x, r)
+        pred = eval_with_descriptor(net, x, r)
         out["preds"].append(pred)
         mse = float(np.mean((pred - r["target"]) ** 2))
-        drift = csoft.region_drift(net, r["region"], r["snap"])
-        share, by_source = csoft.vocab_energy(net, x, r, registry, args)
+        drift = region_drift(net, r["region"], r["snap"],
+                             cols=r["snap_cols"])
+        share, by_source = vocab_energy(net, x, r, registry,
+                                        passes=args.stat_passes)
         out["tasks"].append({
             "name": r["name"],
             "n_own": {"0": len(r["region"][0]), "1": len(r["region"][1])},
