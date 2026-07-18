@@ -72,7 +72,8 @@ def run_sequence_recruit(seed: int, args, device, tasks, x,
     torch.manual_seed(seed)
     np.random.seed(seed)
     H = args.hidden_dim
-    net = poc.build_net(H, args.sigma, args.crossing_h, args.num_samples, device)
+    net = poc.build_net(H, args.sigma, args.crossing_h, args.num_samples,
+                        device, scales=getattr(args, "l1_scales", None))
     past = {0: [], 1: []}
     free = {0: list(range(H)), 1: list(range(H))}
     registry = []

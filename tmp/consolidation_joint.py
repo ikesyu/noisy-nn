@@ -70,13 +70,15 @@ from consolidation_lib import (  # noqa: E402
 # ============================================================
 # Phase B1: union の共同アニール（多目的閉ループ）
 # ============================================================
-def union_anneal(net, x, ctxs, args):
+def union_anneal(net, x, ctxs, args, accept_fn=None):
     """共有場のユニットを貪欲 min S_k でアニールし union を縮める.
 
     場が共有なので活性統計は 1 回の collect_stats で足り、タスク差は
     読み出し使用量（L2 の w2 因子 = Σ_i ||wout_i[:,k]||^2）だけに現れる。
     ホールド・スナップ後回復・巻き戻しはすべて「いずれかのタスクが許容超過」
     の多目的判定で行う。失敗したユニットは巻き戻してその層を閉じる。
+    accept_fn を与えると、スナップ受理の追加条件として呼ばれる（例:
+    アンサンブル評価で絶対格納基準を守る — §12.9.10）。False で巻き戻す。
     """
     holds_total = 0
     removed = {0: 0, 1: 0}
@@ -136,7 +138,7 @@ def union_anneal(net, x, ctxs, args):
             for _ in range(args.epochs_per_step):
                 record(ctxs, joint_round(net, ctxs))
             rec += 1
-        if any_over_tol(ctxs):
+        if any_over_tol(ctxs) or (accept_fn is not None and not accept_fn()):
             joint_restore(net, ctxs, ck)
             banned[l].add(k)
             fails[l] += 1

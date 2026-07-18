@@ -69,12 +69,26 @@ from nnn.credit import EPS  # noqa: E402,F401
 
 
 def build_net(H: int, sigma: float, h: float, t: int, device: torch.device,
-              out_dim: int = 1):
+              out_dim: int = 1, scales: list = None):
     net = ConsolidableNNN(structure=[1, H, H, out_dim], std=sigma, h=h, t=t,
                           output_bias=True)
-    # fncl_driver.build_model と同じ 1 次元 bump タイリング初期化
-    centres = torch.linspace(-2.0, 2.0, H)
-    mag = 0.8 + 0.4 * torch.rand(H)
+    if scales is None:
+        # fncl_driver.build_model と同じ 1 次元 bump タイリング初期化
+        centres = torch.linspace(-2.0, 2.0, H)
+        mag = 0.8 + 0.4 * torch.rand(H)
+    else:
+        # マルチスケール tiling (§12.9.12): scales = [(割合, |w| 倍率), ...]。
+        # バンプ幅は σ/|w| なので、倍率の大きい群が細かい構造を担う。
+        cs, ms = [], []
+        left = H
+        for i, (frac, magv) in enumerate(scales):
+            n_g = left if i == len(scales) - 1 else min(left,
+                                                        round(frac * H))
+            left -= n_g
+            cs.append(torch.linspace(-2.0, 2.0, max(1, n_g)))
+            ms.append(magv * (0.8 + 0.4 * torch.rand(n_g)))
+        centres = torch.cat(cs)
+        mag = torch.cat(ms)
     sign = torch.where(torch.rand(H) < 0.5, -1.0, 1.0)
     w1 = (mag * sign).unsqueeze(1)
     with torch.no_grad():
