@@ -40,7 +40,7 @@ Run:
     python examples/regression_cov_jac.py --epochs 300 --hidden-dim 32 --quick
     python examples/regression_cov_jac.py --noise uniform
 
-Reference: docs/nce_draft.md sections 4.3 and 4.4.
+Reference: docs/draft_nce.md sections 4.3 and 4.4.
 """
 
 from __future__ import annotations
