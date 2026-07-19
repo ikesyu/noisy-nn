@@ -72,6 +72,12 @@ def anneal_until_stop(net, x, target, tol, args, eligible: dict, grad_masks,
     その層を打ち切る。両層が閉じたら終了。share_l1=True では L1 候補の
     補償基底にも語彙 L1 を含める（交差列が学習可能なため補償が流せる）。
     """
+    # --- stop 則 v2 (残課題8 §12.9.14): args 属性でオプトイン ---
+    #   stop_layer_fails    : 層を閉じるまでの失敗ユニット数（既定 1 = 旧動作）
+    #   stop_abort_saturated: 閉ループ飽和が n 段連続で試行を早期中断
+    #                         （既定 None = 旧動作 = max_anneal_steps まで実行）
+    layer_fails = getattr(args, "stop_layer_fails", 1)
+    abort_sat = getattr(args, "stop_abort_saturated", None)
     t_target = torch.tensor(target, device=x.device).unsqueeze(1)
     trainer = poc.CovJacTrainer(net, x, t_target, lr=args.ft_lr, opt=args.opt,
                                 jac_ema=args.jac_ema)
@@ -79,6 +85,8 @@ def anneal_until_stop(net, x, target, tol, args, eligible: dict, grad_masks,
     active = {l: list(eligible[l]) for l in (0, 1)}
     open_layers = {l for l in (0, 1) if active[l]}
     holds_total = 0
+    fails = {0: 0, 1: 0}
+    banned = {0: set(), 1: set()}
     while open_layers:
         # --- 候補選択: 冗長性スコア S_k（基底 = 補償が実際に流せる先） ---
         _, zbar = poc.collect_stats(net, x, passes=args.stat_passes)
@@ -89,6 +97,8 @@ def anneal_until_stop(net, x, target, tol, args, eligible: dict, grad_masks,
             basis_all = active[l] + (vocab[l] if (l == 1 or share_l1)
                                     else [])
             for k in active[l]:
+                if k in banned[l]:
+                    continue
                 S = unit_score(zbar[l], k, [j for j in basis_all if j != k],
                                float((Wn[:, k] ** 2).sum()), args.ridge)
                 if S is not None and (best_l is None or S < best_l[0]):
@@ -103,24 +113,39 @@ def anneal_until_stop(net, x, target, tol, args, eligible: dict, grad_masks,
         k = scored[l][1]
         # --- 消滅経路のアニール + 閉ループ (run_route_B と同一の内側ループ) ---
         ck_net, ck_tr = poc.checkpoint(net), trainer_state(trainer)
-        holds_total += anneal_unit(
+        res = anneal_unit(
             net, l, k, lambda kind: trainer.run(args.epochs_per_step),
             over_tol=lambda: trainer.ema() > tol,
             read_act=lambda: float(trainer.cap.z[l][:, :, k].mean()),
             alpha=args.anneal_alpha, max_holds=args.max_holds,
-            snap_act=args.snap_act, max_steps=args.max_anneal_steps)
-        poc.kill_unit(net, l, k)
-        # --- stop 判定: 回復猶予後も EMA > tol なら巻き戻して層を閉じる ---
-        rec = 0
-        while trainer.ema() > tol and rec < args.stop_recovery:
-            trainer.run(args.epochs_per_step)
-            rec += 1
-        if trainer.ema() > tol:
+            snap_act=args.snap_act, max_steps=args.max_anneal_steps,
+            abort_saturated=abort_sat)
+        holds_inc, completed = (res, True) if abort_sat is None else res
+        holds_total += holds_inc
+        failed = False
+        if completed:
+            poc.kill_unit(net, l, k)
+            # --- 回復猶予後も EMA > tol なら失敗 ---
+            rec = 0
+            while trainer.ema() > tol and rec < args.stop_recovery:
+                trainer.run(args.epochs_per_step)
+                rec += 1
+            failed = trainer.ema() > tol
+        else:
+            failed = True                      # 飽和による早期中断
+        if failed:
             poc.restore(net, ck_net)
             trainer_rollback(trainer, ck_tr)
-            open_layers.discard(l)
-            print(f"    [stop] L{l + 1} unit {k}: 吸収不能 -> 巻き戻し "
-                  f"(自前 L{l + 1} = {len(active[l])} で確定)")
+            banned[l].add(k)
+            fails[l] += 1
+            why = "吸収不能" if completed else "閉ループ飽和で中断"
+            if fails[l] >= layer_fails:
+                open_layers.discard(l)
+                print(f"    [stop] L{l + 1} unit {k}: {why} -> 巻き戻し "
+                      f"(自前 L{l + 1} = {len(active[l])} で確定)")
+            else:
+                print(f"    [fail {fails[l]}/{layer_fails}] L{l + 1} "
+                      f"unit {k}: {why} -> 巻き戻し・候補から除外")
         else:
             active[l].remove(k)
             if not active[l]:

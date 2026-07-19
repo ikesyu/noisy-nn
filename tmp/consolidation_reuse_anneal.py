@@ -68,6 +68,8 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
     作用は workspace の場と現タスクの読み出し列に限られる（入力側は凍結）。
     Returns (losses, holds_total, voc_alive)
     """
+    layer_fails = getattr(args, "stop_layer_fails", 1)
+    abort_sat = getattr(args, "stop_abort_saturated", None)
     t_target = torch.tensor(target, device=x.device).unsqueeze(1)
     trainer = poc.CovJacTrainer(net, x, t_target, lr=args.ft_lr, opt=args.opt,
                                 jac_ema=args.jac_ema)
@@ -76,6 +78,8 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
              (1, "voc"): list(vocab[1])}
     open_groups = {g for g in pools if pools[g]}
     holds_total = 0
+    fails = {g: 0 for g in pools}
+    banned = {g: set() for g in pools}
     while open_groups:
         _, zbar = poc.collect_stats(net, x, passes=args.stat_passes)
         scored = {}
@@ -91,6 +95,8 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
                 basis_all = pools[(1, "own")] + pools[(1, "voc")]
             best_g = None
             for k in pools[g]:
+                if k in banned[g]:
+                    continue
                 S = unit_score(zbar[l], k, [j for j in basis_all if j != k],
                                float((Wn[:, k] ** 2).sum()), args.ridge)
                 if S is not None and (best_g is None or S < best_g[0]):
@@ -105,23 +111,38 @@ def anneal_until_stop_prune(net, x, target, tol, args, eligible: dict,
         l, kind = g
         k = scored[g][1]
         ck_net, ck_tr = poc.checkpoint(net), trainer_state(trainer)
-        holds_total += anneal_unit(
+        res = anneal_unit(
             net, l, k, lambda _kind: trainer.run(args.epochs_per_step),
             over_tol=lambda: trainer.ema() > tol,
             read_act=lambda: float(trainer.cap.z[l][:, :, k].mean()),
             alpha=args.anneal_alpha, max_holds=args.max_holds,
-            snap_act=args.snap_act, max_steps=args.max_anneal_steps)
-        poc.kill_unit(net, l, k)
-        rec = 0
-        while trainer.ema() > tol and rec < args.stop_recovery:
-            trainer.run(args.epochs_per_step)
-            rec += 1
-        if trainer.ema() > tol:
+            snap_act=args.snap_act, max_steps=args.max_anneal_steps,
+            abort_saturated=abort_sat)
+        holds_inc, completed = (res, True) if abort_sat is None else res
+        holds_total += holds_inc
+        failed = False
+        if completed:
+            poc.kill_unit(net, l, k)
+            rec = 0
+            while trainer.ema() > tol and rec < args.stop_recovery:
+                trainer.run(args.epochs_per_step)
+                rec += 1
+            failed = trainer.ema() > tol
+        else:
+            failed = True
+        if failed:
             poc.restore(net, ck_net)
             trainer_rollback(trainer, ck_tr)
-            open_groups.discard(g)
-            print(f"    [stop] {g} unit {k}: 吸収不能 -> 巻き戻し "
-                  f"(残 = {len(pools[g])} で確定)")
+            banned[g].add(k)
+            fails[g] += 1
+            why = "吸収不能" if completed else "閉ループ飽和で中断"
+            if fails[g] >= layer_fails:
+                open_groups.discard(g)
+                print(f"    [stop] {g} unit {k}: {why} -> 巻き戻し "
+                      f"(残 = {len(pools[g])} で確定)")
+            else:
+                print(f"    [fail {fails[g]}/{layer_fails}] {g} unit {k}: "
+                      f"{why} -> 巻き戻し・候補から除外")
         else:
             pools[g].remove(k)
             if not pools[g]:

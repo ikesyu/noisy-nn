@@ -437,7 +437,7 @@ def probe_tuning_corr(net, x, target, vocab: dict, sigma0: float, h0: float,
 # ============================================================
 def anneal_unit(net, l: int, k: int, run_block, over_tol, read_act, *,
                 alpha: float, max_holds: int, snap_act: float,
-                max_steps: int) -> int:
+                max_steps: int, abort_saturated: int = None):
     """Fade unit (l, k) along the vanishing path under a closed loop.
 
     Per anneal step: decay sigma_k by alpha (deep layers escalate h_k by
@@ -446,9 +446,17 @@ def anneal_unit(net, l: int, k: int, run_block, over_tol, read_act, *,
     measured mean activity read_act() drops below snap_act or after
     max_steps. The caller decides what a block trains (one task, or an
     alternating round over several) and performs the snap/kill afterwards.
-    Returns the total number of hold blocks.
+
+    With abort_saturated=None (default) returns the total number of hold
+    blocks — byte-compatible with every earlier caller. With an integer n,
+    the attempt is ABORTED once n consecutive anneal steps saturate the
+    closed loop (holds hit max_holds and the EMA is still over tolerance:
+    the §12.5 leading indicator, used here to cut a failing attempt short
+    instead of running it to max_steps), and the return becomes the tuple
+    (holds, completed).
     """
-    steps, holds = 0, 0
+    steps, holds, sat = 0, 0, 0
+    completed = True
     while True:
         net.sigma_vecs[l][k] *= alpha
         if l >= 1:
@@ -460,9 +468,16 @@ def anneal_unit(net, l: int, k: int, run_block, over_tol, read_act, *,
             h += 1
         holds += h
         steps += 1
+        if abort_saturated is not None:
+            sat = sat + 1 if (h >= max_holds and over_tol()) else 0
+            if sat >= abort_saturated:
+                completed = False
+                break
         if read_act() < snap_act or steps >= max_steps:
             break
-    return holds
+    if abort_saturated is None:
+        return holds
+    return holds, completed
 
 
 # ============================================================
