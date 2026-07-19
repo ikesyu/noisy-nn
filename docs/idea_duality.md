@@ -1,6 +1,6 @@
 # 重みパラメータ θ とノイズ場 P の双対性（構想メモ）
 
-NCE 投稿論文（`docs/nce_draft.md`, "Reconstructing Backpropagation from Forward
+NCE 投稿論文（`docs/draft_nce.md`, "Reconstructing Backpropagation from Forward
 Fluctuations in Noise-modulated Neural Networks"）の**続編**として、ノイズ場を
 主題にする構想の整理。現状の実装（`examples/dual_*.py` 2 本）が NCE 本体の
 主張と噛み合っていない点と、その解消方針を記録する。
@@ -87,7 +87,7 @@ $$y = f(x; \theta, \mathcal{P})$$
   活性化する、すなわち**機能するか**を決める。交差活性
   $\bar\phi(d;\sigma) = 2F(d;\sigma)(1-F(d;\sigma))$ を通して、$\sigma \to 0$ の
   ユニットは応答が恒等的に 0 になり、適切な $\sigma$ を持つユニットだけが
-  確率共鳴で信号を伝える（`nce_draft.md` §3.2）。
+  確率共鳴で信号を伝える（`draft_nce.md` §3.2）。
 
 θ は「計算の実体」、P は「その実体のどこを起動するかというルーティング／
 ゲート」を担う。両者は同じ関数 $f$ を規定するが、役割が異なる。
@@ -135,7 +135,7 @@ overlap（$\lambda_\text{overlap}\,\cos(P_A, P_B)$）の正則化を加えたも
 
 ### SPSA（Simultaneous Perturbation Stochastic Approximation, Spall 1992）
 
-勾配を計算せず、損失の評価だけから勾配を推定する手法（`nce_draft.md` §2.3 の
+勾配を計算せず、損失の評価だけから勾配を推定する手法（`draft_nce.md` §2.3 の
 関連研究に既出）。パラメータが $d$ 次元のとき素朴な差分は $2d$ 回の損失評価を
 要するが、SPSA は全成分を同時にランダム方向 $\delta$ へ振って **2 回**で済ませる：
 
@@ -215,7 +215,7 @@ $$\frac{\partial L}{\partial \sigma^{(l)}_k} \approx
 \underbrace{\Bigl(-\tfrac{d^{(l)}_{n,k}}{\sigma^{(l)}_k}\Bigr)\phi_T'\bigl(d^{(l)}_{n,k}\bigr)}_{\partial z_k/\partial \sigma_k\ \text{（局所感度）}}
 \,\Bigr\rangle_{m,n}$$
 
-と書ける。これは `nce_draft.md` 末尾の三要素則の式
+と書ける。これは `draft_nce.md` 末尾の三要素則の式
 
 $$\frac{\partial L}{\partial W^{(l)}_{ij}} \approx
 \bigl\langle \hat g^{(l)}_{n,i}\cdot\phi_T'(d^{(l)}_{n,i})\cdot z^{(l-1)}_{n,j}\bigr\rangle_{m,n}$$

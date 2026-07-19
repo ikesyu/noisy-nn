@@ -1,5 +1,5 @@
 """
-fncl_common.py — NCE 論文ドラフト (docs/nce_draft.md) §5 以降の実験スクリプト
+fncl_common.py — NCE 論文ドラフト (docs/draft_nce.md) §5 以降の実験スクリプト
 (fncl5_*.py, fncl6_*.py) の共通基盤.
 
 fncl パッケージ (data_nce/fncl/) のモデル構築・学習ルーチンをそのまま再利用し、

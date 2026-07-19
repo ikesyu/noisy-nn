@@ -1,10 +1,10 @@
 # NNN のデジタル回路（FPGA）実装 — 検討・実験ログ
 
-NCE 投稿論文（`docs/nce_draft.md`, cov_jac / cov_jac_full）の提案手法を FPGA に
+NCE 投稿論文（`docs/draft_nce.md`, cov_jac / cov_jac_full）の提案手法を FPGA に
 実装し、**学習と推論の両方がオンチップで動く**ことを実証する計画の記録。
 最終目標は Lattice Semiconductor 製品をロボットに組み込んだ運動学習デモ。
 
-関連: `docs/nce_draft.md` §6（資源分析）、`docs/idea_duality.md`（続編構想。
+関連: `docs/draft_nce.md` §6（資源分析）、`docs/idea_duality.md`（続編構想。
 §6 の「1 つの場が推論・学習・電力を同時にゲートする」は方向 C として本計画と接続）。
 
 - 2026-07-15 計画立案、Phase 0 完了（両実験 PASS）
