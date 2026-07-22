@@ -6,6 +6,10 @@ Critic : external ValueMLP trained by backprop on GAE returns (the integration c
 Advantage: GAE(gamma, lambda); advantages are normalized per batch.  Curriculum: a fraction
 of episodes start near the bottom (full swing-up practice).  Exploration is intrinsic (the
 NNN sample spread), so no entropy bonus is needed.
+
+The actor mirror is a persistent EMA + Kolen-Pollack tracker by default (mirror_beta=0.1,
+the design validated in idea_rl.md §23.9); mirror_beta=None restores the historical
+per-step single-shot mirror (§23.1-23.7 runs).
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from .policy_cont import ContinuousNNNPolicy
 from .critic import ValueMLP
 from . import credit as C
 from .envs_swingup import CartPoleSwingUp
+from .field import H_DEAD
 from .train import ManualOpt, RunningNorm
 from .multimode import _p
 
@@ -30,23 +35,41 @@ def _norm(norm, obs, update):
     return norm.normalize(rt)
 
 
-def _set_field(policy, fields, cos_theta, gate_k, gate_c):
+def _apply_rho(policy, rho, sigma0, h0):
+    """rho-gate (§23.7): per-unit sigma = rho*sigma0 AND h = h0/rho (capped at the
+    H_DEAD sentinel).  rho -> 0 silences a unit exactly at any depth -- upstream sample
+    fluctuations cannot cross the escalated threshold, so z = 0, the KDE slope = 0 and
+    the credit = 0 all hold strictly (the §23.4 sigma-only leak fix; see
+    idea_consolidation.md §4.5-4.6)."""
+    policy.field = [r * float(sigma0) for r in rho]
+    for l, gc in enumerate(policy.crossings):
+        gc.h = (h0 / rho[l].clamp_min(h0 / H_DEAD)).clamp(max=H_DEAD)
+
+
+def _set_field(policy, fields, cos_theta, gate_k, gate_c,
+               rho_mode=False, sigma0=0.6, h0=0.15):
     """Noise-field OPTION gate (方向3a): blend P_pump (fields[0]) and P_balance (fields[1])
     by proximity to upright.  g -> 1 near the top (balance mode), g -> 0 far (pump mode);
-    the two modes are addressed on the SAME shared weights by the field."""
+    the two modes are addressed on the SAME shared weights by the field.  With
+    `rho_mode` the prototypes are rho-fields and the blend drives BOTH dials
+    (sigma up, threshold down) via `_apply_rho`."""
     g = 1.0 / (1.0 + math.exp(-gate_k * (cos_theta - gate_c)))
-    policy.field = [(1.0 - g) * fields[0][l] + g * fields[1][l]
-                    for l in range(len(fields[0]))]
+    blend = [(1.0 - g) * fields[0][l] + g * fields[1][l]
+             for l in range(len(fields[0]))]
+    if rho_mode:
+        _apply_rho(policy, blend, sigma0, h0)
+    else:
+        policy.field = blend
 
 
 def train_a2c(seed=0, H=128, sigma=0.6, updates=400, episodes_per_update=3, horizon=400,
               gamma=0.99, lam=0.95, lr_actor=0.01, lr_critic=1e-3, critic_epochs=8,
               bottom_frac=0.5, force_mag=20.0, x_threshold=4.0,
               sigma_explore=0.4, sigma_explore_end=0.1,
-              fields=None, gate_k=6.0, gate_c=0.0,
+              fields=None, gate_k=6.0, gate_c=0.0, rho_mode=False, h0=0.15,
               fixed_field=None, start_center=None, start_range=0.5,
               init_body=None, freeze_mask=None, n_hidden_layers=2, energy_reward=True,
-              norm_obj=None, update_norm=True,
+              norm_obj=None, update_norm=True, mirror_beta=0.1,
               checkpoint_every=25, verbose=True):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
@@ -59,10 +82,14 @@ def train_a2c(seed=0, H=128, sigma=0.6, updates=400, episodes_per_update=3, hori
     if init_body is not None:
         policy.net.load_state_dict(init_body)
     if fixed_field is not None:
-        policy.field = fixed_field
+        if rho_mode:
+            _apply_rho(policy, fixed_field, sigma, h0)
+        else:
+            policy.field = fixed_field
     critic = ValueMLP(5)
     keys = C.param_keys(policy)
     actor_opt = ManualOpt("adam")
+    mirror = C.MirrorEMA(mirror_beta) if mirror_beta else None
     critic_opt = torch.optim.Adam(critic.parameters(), lr=lr_critic)
     norm = norm_obj if norm_obj is not None else RunningNorm(5)
 
@@ -83,9 +110,11 @@ def train_a2c(seed=0, H=128, sigma=0.6, updates=400, episodes_per_update=3, hori
             psis, rews, vals, obses = [], [], [], []
             for _ in range(horizon):
                 if fields is not None and fixed_field is None:
-                    _set_field(policy, fields, float(obs[2]), gate_k, gate_c)  # cos(theta)
+                    _set_field(policy, fields, float(obs[2]), gate_k, gate_c,  # cos(theta)
+                               rho_mode, sigma, h0)
                 step = policy.rollout_step(on.unsqueeze(0))
-                psis.append(C.cov_jac_grad(policy, step))
+                psis.append(mirror.grad(policy, step) if mirror is not None
+                            else C.cov_jac_grad(policy, step))
                 with torch.no_grad():
                     vals.append(float(critic(on.unsqueeze(0))))
                 obses.append(on)
@@ -120,11 +149,15 @@ def train_a2c(seed=0, H=128, sigma=0.6, updates=400, episodes_per_update=3, hori
         for t in range(N):
             for k in keys:
                 grad[k] += float(A[t]) * b_psi[t][k]
+        if mirror is not None:
+            mirror.snapshot_weights(policy)
         for k in keys:
             g = grad[k] / N
             if freeze_mask is not None and k in freeze_mask:
                 g = g * (1.0 - freeze_mask[k])               # freeze subnetwork-A params
             actor_opt.update(str(k), _p(policy, k), -g, lr_actor)
+        if mirror is not None:
+            mirror.kp_track(policy)
 
         # --- critic update: backprop MSE to GAE returns ---
         obs_b = torch.stack(b_obs)
@@ -137,20 +170,23 @@ def train_a2c(seed=0, H=128, sigma=0.6, updates=400, episodes_per_update=3, hori
 
         if checkpoint_every and (upd + 1) % checkpoint_every == 0:
             checkpoints.append((upd + 1, _snapshot(policy, norm, H, force_mag,
-                                                   fields, gate_k, gate_c)))
+                                                   fields, gate_k, gate_c,
+                                                   rho_mode, sigma, h0)))
         if verbose and (upd + 1) % 10 == 0:
             print(f"  [a2c seed{seed}] upd {upd+1:4d}  ep_return/step "
                   f"{np.mean(hist[-10:]) / horizon:+.3f}")
     return policy, env, norm, critic, checkpoints, hist
 
 
-def _snapshot(policy, norm, H, force_mag, fields=None, gate_k=6.0, gate_c=0.0):
+def _snapshot(policy, norm, H, force_mag, fields=None, gate_k=6.0, gate_c=0.0,
+              rho_mode=False, sigma0=0.6, h0=0.15):
     std = torch.sqrt(norm.M2 / norm.count + norm.eps)
     return {"net": {k: v.detach().clone() for k, v in policy.net.state_dict().items()},
             "norm_mean": norm.mean.detach().clone(), "norm_std": std.detach().clone(),
             "hidden": H, "t": policy.t, "force_mag": force_mag,
             "n_layers": len(policy.crossings),
-            "fields": fields, "gate_k": gate_k, "gate_c": gate_c}
+            "fields": fields, "gate_k": gate_k, "gate_c": gate_c,
+            "rho_mode": rho_mode, "sigma0": sigma0, "h0": h0}
 
 
 def build_policy(state):
@@ -161,6 +197,8 @@ def build_policy(state):
     p.eval()
     p._opt_fields = state.get("fields")            # noise-field option (方向3a), or None
     p._gate_k, p._gate_c = state.get("gate_k", 6.0), state.get("gate_c", 0.0)
+    p._rho_mode = state.get("rho_mode", False)     # rho-gate (§23.7), both dials
+    p._sigma0, p._h0 = state.get("sigma0", 0.6), state.get("h0", 0.15)
     return p, state["norm_mean"], state["norm_std"]
 
 
@@ -175,7 +213,8 @@ def eval_from_bottom(state, horizon=500, seeds=(0, 1, 2)):
         cs = []
         for _ in range(horizon):
             if p._opt_fields is not None:
-                _set_field(p, p._opt_fields, float(obs[2]), p._gate_k, p._gate_c)
+                _set_field(p, p._opt_fields, float(obs[2]), p._gate_k, p._gate_c,
+                           p._rho_mode, p._sigma0, p._h0)
             on = torch.clamp((torch.tensor(obs, dtype=torch.float32) - mean) / std, -5, 5)
             step = p.rollout_step(on.unsqueeze(0), greedy=True)
             obs, r, te, tr, _ = env.step(float(step.action.item()))

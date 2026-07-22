@@ -5,6 +5,13 @@ critic trained by the SAME forward mirror (cov_jac) as the actor -- regressing t
 returns.  Now the WHOLE system (policy + value + exploration + credit for both) is one
 forward-only NNN computation: no transposed-weight backward pass anywhere.  Returns are
 standardized (running mean/std) so the value readout stays at a manageable scale.
+
+`mirror_beta` (fix 1, idea_rl.md §23.9): BOTH the actor and the critic use a persistent
+EMA weight mirror with Kolen-Pollack tracking (credit.MirrorEMA) instead of the original
+per-step single-shot mirror.  The critic body keeps LEARNING by cov_jac (features are
+trained, forward-only) -- only the mirror estimate is stabilized.  §23.9 showed this
+alone lifts §23.5's 0.44 to full balance, so beta=0.1 is now the DEFAULT; pass
+mirror_beta=None for the historical §23.5 single-shot behaviour.
 """
 from __future__ import annotations
 
@@ -27,7 +34,7 @@ def train_a2c_nnn(seed=0, H=128, Hc=64, sigma=0.6, updates=400, episodes_per_upd
                   horizon=400, gamma=0.99, lam=0.95, lr_actor=0.01, lr_critic=0.02,
                   critic_epochs=4, bottom_frac=0.5, force_mag=20.0, x_threshold=4.0,
                   sigma_explore=0.4, sigma_explore_end=0.1, fields=None, gate_k=6.0,
-                  gate_c=0.0, checkpoint_every=25, verbose=True):
+                  gate_c=0.0, mirror_beta=0.1, checkpoint_every=25, verbose=True):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     env = CartPoleSwingUp(horizon=horizon, seed=seed, force_mag=force_mag,
@@ -38,6 +45,8 @@ def train_a2c_nnn(seed=0, H=128, Hc=64, sigma=0.6, updates=400, episodes_per_upd
     akeys, ckeys = C.param_keys(policy), C.param_keys(critic)
     actor_opt, critic_opt = ManualOpt("adam"), ManualOpt("adam")
     norm = RunningNorm(5)
+    amir = C.MirrorEMA(mirror_beta) if mirror_beta else None      # fix 1: persistent mirrors
+    cmir = C.MirrorEMA(mirror_beta) if mirror_beta else None
     ret_mean, ret_std, ret_seen = 0.0, 1.0, 0.0            # running return standardization
 
     hist, checkpoints = [], []
@@ -56,7 +65,8 @@ def train_a2c_nnn(seed=0, H=128, Hc=64, sigma=0.6, updates=400, episodes_per_upd
                 if fields is not None:
                     _set_field(policy, fields, float(obs[2]), gate_k, gate_c)
                 step = policy.rollout_step(on.unsqueeze(0))
-                psis.append(C.cov_jac_grad(policy, step))
+                psis.append(amir.grad(policy, step) if amir is not None
+                            else C.cov_jac_grad(policy, step))
                 v_std, cstep = critic.value_step(on.unsqueeze(0))   # NNN critic forward
                 csteps.append(cstep); vstds.append(v_std)
                 vals.append(v_std * ret_std + ret_mean)
@@ -95,8 +105,12 @@ def train_a2c_nnn(seed=0, H=128, Hc=64, sigma=0.6, updates=400, episodes_per_upd
         for t in range(N):
             for k in akeys:
                 ga[k] += float(A[t]) * b_psi[t][k]
+        if amir is not None:
+            amir.snapshot_weights(policy)
         for k in akeys:
             actor_opt.update(str(k), _p(policy, k), -ga[k] / N, lr_actor)
+        if amir is not None:
+            amir.kp_track(policy)
 
         # --- critic: cov_jac regression to standardized returns (no backprop) ---
         # single pass over the stored forward internals; value-error score = V_std - target
@@ -105,18 +119,25 @@ def train_a2c_nnn(seed=0, H=128, Hc=64, sigma=0.6, updates=400, episodes_per_upd
         for t in range(N):
             cstep = b_cstep[t]
             cstep.score = torch.tensor([[b_vstd[t] - float(tgt[t])]])   # value-error score
-            psi = C.cov_jac_grad(critic, cstep)
+            psi = (cmir.grad(critic, cstep) if cmir is not None
+                   else C.cov_jac_grad(critic, cstep))
             for k in ckeys:
                 gc[k] += psi[k]
+        if cmir is not None:
+            cmir.snapshot_weights(critic)
         for k in ckeys:
             critic_opt.update(str(k), _p(critic, k), gc[k] / N, lr_critic)
+        if cmir is not None:
+            cmir.kp_track(critic)
 
         if checkpoint_every and (upd + 1) % checkpoint_every == 0:
             checkpoints.append((upd + 1, _snap(policy, norm, H, force_mag, fields,
                                                gate_k, gate_c)))
         if verbose and (upd + 1) % 10 == 0:
+            v = np.array(b_vstd)
+            r2 = float(1.0 - ((v - tgt) ** 2).mean() / (tgt.var() + 1e-8))
             print(f"  [nnn-ac seed{seed}] upd {upd+1:4d}  ep_return/step "
-                  f"{np.mean(hist[-10:]) / horizon:+.3f}")
+                  f"{np.mean(hist[-10:]) / horizon:+.3f}  value R2 {r2:+.3f}")
     return policy, critic, norm, checkpoints, hist
 
 

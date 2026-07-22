@@ -211,6 +211,52 @@ def cov_jac_grad(policy, step):
     return recursion_from_weights(policy, step, W_out, W_hidden)
 
 
+class MirrorEMA:
+    """Persistent EMA weight mirror with Kolen-Pollack tracking (fix B, idea_rl.md §23.8).
+
+    `cov_jac_grad` re-estimates the mirror from a SINGLE state's T samples at every step
+    (high variance).  The supervised pipeline that validated cov_jac (CovJacTrainer,
+    consolidation) instead keeps a PERSISTENT mirror: each measurement is blended in by
+    EMA, and the applied weight updates are added so the mirror tracks the moving true
+    weights (Kolen-Pollack).  This class ports that design to the RL loop: steady-state
+    mirror variance drops to ~beta/(2-beta) of single-shot (beta=0.1 -> ~1/19).
+    """
+
+    def __init__(self, beta=0.1):
+        self.beta = beta
+        self.W_out = None
+        self.W_hidden = None
+
+    def grad(self, policy, step):
+        """Blend this pass's measurement into the stored mirror, then run the credit
+        recursion with the BLENDED mirror.  Same call shape as `cov_jac_grad`."""
+        W_out, W_hidden = mirror_weights(policy, step)
+        if self.W_out is None:
+            self.W_out = W_out.clone()
+            self.W_hidden = {l: w.clone() for l, w in W_hidden.items()}
+        else:
+            self.W_out += self.beta * (W_out - self.W_out)
+            for l, w in W_hidden.items():
+                self.W_hidden[l] += self.beta * (w - self.W_hidden[l])
+        return recursion_from_weights(policy, step, self.W_out, self.W_hidden)
+
+    def snapshot_weights(self, policy):
+        """Call BEFORE applying weight updates; pairs with `kp_track`."""
+        n_hidden = len(policy.crossings)
+        self._prev = {l: policy.fcs[l].weight.detach().clone()
+                      for l in range(1, n_hidden + 1)}
+
+    def kp_track(self, policy):
+        """Kolen-Pollack: add the just-applied update of each mirrored weight to the
+        mirror, so it keeps tracking the moving true weights between measurements."""
+        if self.W_out is None:
+            return
+        n_hidden = len(policy.crossings)
+        for l in range(1, n_hidden):
+            self.W_hidden[l] += policy.fcs[l].weight.detach() - self._prev[l]
+        self.W_out += policy.fcs[n_hidden].weight.detach() - self._prev[n_hidden]
+
+
 def true_transpose_grad(policy, step):
     W_out, W_hidden = true_weights(policy, step)
     return recursion_from_weights(policy, step, W_out, W_hidden)

@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import torch
 
+# Threshold sentinel for rho-gated fields: a rho=0 unit cannot cross even under upstream
+# sample fluctuations (idea_consolidation.md §4.5), so z = 0 holds exactly at any depth.
+H_DEAD = 1.0e6
+
 
 def uniform(H, sigma, n_layers=2):
     return [torch.full((H,), float(sigma)) for _ in range(n_layers)]
@@ -41,6 +45,15 @@ def recruit(H, sigma, side, n_layers=2, quiet=0.0):
     else:
         v[n:] = float(sigma)
     return [v.clone() for _ in range(n_layers)]
+
+
+def recruit_rho(H, side, n_layers=2, quiet=0.0):
+    """Recruitment field in the RHO (mobilisation-dial) convention: 1.0 on the recruited
+    half, `quiet` on the other.  Use with rho-gating (sigma = rho*sigma0, h = h0/rho,
+    idea_consolidation.md §4.6): unlike the sigma-only `recruit`, the off half is then
+    silenced EXACTLY at any depth (h sentinel), which is what makes cross-layer skill
+    protection clean (idea_rl.md §23.7 -- the §23.4 leak fix)."""
+    return recruit(H, 1.0, side, n_layers=n_layers, quiet=quiet)
 
 
 def bump(H, center, sigma, tau=0.15, n_layers=1, cutoff=0.1):
