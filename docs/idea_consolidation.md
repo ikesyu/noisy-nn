@@ -37,6 +37,13 @@ $$
 
 §12 以降の実行報告は、**実施順に、失敗と設計反復を含めて**記録してある（例：ノイズ予算移転の負の結果 §6.4／§12.4、$\sigma=0$ リークの発見と全面再検証 §12.7、案4 の 2 回の設計反復 §12.9.4、圧縮受理条件の欠陥と修正 §12.9.9→§12.9.10）。これは追試可能性と、どの結論がどの条件に依存するかを明示するためである。確定した比較値を先に見たい場合は §12.9.13（統一容量比較）と §15（結論）から読むとよい。
 
+**コード構成（2026-07-27 整理、`tmp/`、`tmp/rl/`・`tmp/reservoir/` と同様の切り分け）：**
+- `tmp/consolidation/` — 共通ライブラリ（旧 `consolidation_lib.py`＝互換シム）。`ConsolidableNNN`（$\rho=(\sigma,h)$ 動員ダイヤル）・消滅経路操作（anneal/snap/kill）・持続状態 cov_jac トレーナ・冗長度スコア・タスク別動員場と記述子・多タスクヘルパ。
+- `tmp/consolidation_poc.py` — §12.4 PoC（経路A/B）。加えて `build_net`/`make_task`/`kill_unit` とライブラリ再輸出を持つ第2のライブラリ層で、多くの実験が `import consolidation_poc as poc` で利用。
+- **確定結果のトップレベル：** `consolidation_grand.py`＋`consolidation_grand_fig.py`＋`consolidation_caseB.py`（§12.9.13 統一容量比較）、`consolidation_solid.py`（§12.8 ハード）、`consolidation_midcompress.py`（§12.9.16 途中圧縮＋再播種で 12/16）、`consolidation_rho.py`（§12.9.15 連続 $\rho$）、`consolidation_rehearsal.py`（§12.9.5）。
+- **部品（case 関数を export）：** `consolidation_soft`/`recruit`/`reuse_anneal`/`joint`/`capacity`/`multiscale`（§12.9.1–12）。上記トップレベルはこれらの上に構築。`consolidation_stop_signal`/`floor_test`/`multiout_floor` は §12.5–12.6 の結果＋依存。
+- **注：** `multivalued_*.py`（`docs/idea_multivalued.md`）も同ライブラリに依存する。
+
 ---
 
 ## 2. 前提：交差活性と本稿で扱う量

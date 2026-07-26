@@ -1,3 +1,10 @@
+"""Train the CartPole swing-up policy as a noise-field option: pump/balance
+soft-recruitment fields on one NNN (方向3a, docs/idea_rl.md §23.2). Saves
+checkpoints to tmp/out/swingup_field.pt, which tmp/rl_cartpole_swingup_demo.py
+can render (pass --run tmp/out/swingup_field.pt).
+
+Run:  .venv/bin/python tmp/rl_swingup_field_train.py
+"""
 import sys; sys.path.append('tmp')
 import torch, numpy as np
 from rl.a2c_swingup import train_a2c, eval_from_bottom

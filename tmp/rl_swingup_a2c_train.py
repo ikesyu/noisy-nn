@@ -1,3 +1,9 @@
+"""Train the CartPole swing-up policy: continuous NNN cov_jac actor (no backprop)
++ external GAE critic (方向1, docs/idea_rl.md §23.1). Saves checkpoints to
+tmp/out/swingup_a2c.pt, which tmp/rl_cartpole_swingup_demo.py renders into a GIF.
+
+Run:  .venv/bin/python tmp/rl_swingup_a2c_train.py
+"""
 import sys; sys.path.append('tmp')
 import torch, numpy as np
 from rl.a2c_swingup import train_a2c, eval_from_bottom
