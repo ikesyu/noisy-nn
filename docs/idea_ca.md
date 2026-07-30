@@ -97,7 +97,7 @@ Noise-modulated Neural Networks*
 追試（§2.2）により **低下要因は再帰構造ではなくミラー推定であること**，および **測定
 プロトコルが実学習時のミラー品質を過小評価していること** が判明した．
 
-### 2.1 主測定（`tmp/fncl_a1.py` → `tmp/out/fncl_a1/results.json`）
+### 2.1 主測定（`tmp/fncl_mnist_fidelity.py` → `tmp/out/fncl_a1/results.json`）
 
 **設定**: MNIST から class-balanced に 250 枚（784 次元，$x\in[-1,1]$），10 クラス，
 **交差エントロピー損失**，NNN 784-256-…-256-10（隠れ層 2/3/4），$T=64$，ガウス $\sigma=0.5$，
@@ -127,7 +127,7 @@ $h=0.2$，seed 0．読み出し誤差は解析形（softmax $-$ onehot）を使�
    §2.2 で原因を切り分けた．なお同条件を別の学習軌道で測ると 0.85–0.93 になり
    （§2.2 の depth 4 / ep 300），この値は軌道依存で振れる．
 
-### 2.2 低下要因の切り分け（`tmp/fncl_a1b.py` → `tmp/out/fncl_a1b/results.json`）
+### 2.2 低下要因の切り分け（`tmp/fncl_mnist_fidelity_decomp.py` → `tmp/out/fncl_a1b/results.json`）
 
 autograd の厳密勾配は「$W$ の転置 × 交差活性の内部 KDE 係数」であり，その局所微分は
 `cov_jac` が使う `kde_slope` と**同一の推定量**である（`nnn/activation.py`
@@ -167,7 +167,7 @@ autograd の厳密勾配は「$W$ の転置 × 交差活性の内部 KDE 係数�
    相対誤差が拡大する）．すなわち，浅い網では過収束が，深い網ではミラーのバイアスが，
    それぞれ別の理由で cosine を下げている．
 
-### 2.3 実学習時のミラーでの再測定（`tmp/fncl_a1c.py`）
+### 2.3 実学習時のミラーでの再測定（`tmp/fncl_mnist_train.py`）
 
 §2.1–2.2 の測定は **backprop で事前学習したネット上でミラーを単発測定**しており，
 実際の `cov_jac` 学習が使うミラーではない．原稿 §4.3 のミラーは (i) 毎 epoch の
@@ -252,7 +252,7 @@ $\mathrm{Cov}(d,z)/\mathrm{Var}(z)$ が $\sum_{k \ne i} W_{jk}\mathrm{Cov}(z_k, 
 だけずれる．原稿が「サンプル数で消えない方向性バイアス」と書いたとおり，
 §2.2 でサンプル 16 倍でも改善しなかったことと整合する．
 
-### 2.5 A1'（分岐）: 多変量ミラーによる修正（`tmp/fncl_a1e.py`）
+### 2.5 A1'（分岐）: 多変量ミラーによる修正（`tmp/fncl_mnist_mirror_variants.py`）
 
 原稿 §6.1 は厳密な多変量回帰
 $\mathrm{Cov}(d,z)\,\mathrm{Cov}(z,z)^{-1}$ を「$O(H^3)$ で局所性を損なう」として
@@ -347,7 +347,7 @@ $O(H^2)$ 累算）が要る．これは原稿 表 4 のメモリ・演算見積�
 `cov_jac` を差別化できない（差は 1.5–2.6 倍にとどまる）．差別化は §5.3 の
 勾配忠実度に置くべきであり，そのための追加測定（§3.3）を実施した．
 
-### 3.1 実装（`tmp/fncl_a2.py`）
+### 3.1 実装（`tmp/fncl_baselines.py`）
 
 §5.1 の sin(x) プロトコル（1-64-64-1，$T=64$，1500 epoch，ガウス $\sigma=0.5$，
 seed 0–2，同一初期重み）を一切変えずに，NNN 上に競合手法を実装した．
@@ -406,7 +406,7 @@ seed 0–2，同一初期重み）を一切変えずに，NNN 上に競合手法
    改訂稿に載せる場合は「本設定では調整できなかった」と正直に書くべきで，
    無理に載せない選択もある．
 
-### 3.3 位置づけの修正 —— 勾配忠実度で差別化する（`tmp/fncl_a2b.py`）
+### 3.3 位置づけの修正 —— 勾配忠実度で差別化する（`tmp/fncl_baselines_fidelity.py`）
 
 §3.2 の結果は原稿の物語に対して**注意を要する**．査読者が「FA/DFA でも同じ精度が
 出るなら，共分散ミラーの複雑さは何のためか」と書くのは自然である．
@@ -508,17 +508,17 @@ FA/DFA/`cov_jac` の更新方向を autograd 厳密勾配と比較した．
 
 | 内容 | スクリプト | 出力 |
 |---|---|---|
-| A1 主測定（層深依存性） | `tmp/fncl_a1.py` | `tmp/out/fncl_a1/`, `tmp/out/a1.log` |
-| A1b 要因分解（ミラー vs 分散） | `tmp/fncl_a1b.py` | `tmp/out/fncl_a1b/`, `tmp/out/a1b.log` |
-| A1c 実学習（250 枚） | `tmp/fncl_a1c.py` | `tmp/out/fncl_a1c/`, `tmp/out/a1c.log` |
-| A1d 汎化（1000/1000） | `tmp/fncl_a1c.py --n-test` | `tmp/out/fncl_a1d/`, `tmp/out/a1d.log` |
-| A1e 多変量ミラー | `tmp/fncl_a1e.py` | `tmp/out/fncl_a1e/`, `tmp/out/a1e.log` |
-| A1f ブロック対角掃引 | `tmp/fncl_a1e.py --modes blk*` | `tmp/out/fncl_a1f/`, `tmp/out/a1f.log` |
-| A2 競合手法ベースライン | `tmp/fncl_a2.py` | `tmp/out/fncl_a2/`, `tmp/out/a2_{sin,bench}.log` |
-| A2b 忠実度比較（FA/DFA） | `tmp/fncl_a2b.py` | `tmp/out/fncl_a2b/`, `tmp/out/a2b.log` |
+| A1 主測定（層深依存性） | `tmp/fncl_mnist_fidelity.py` | `tmp/out/fncl_a1/`, `tmp/out/a1.log` |
+| A1b 要因分解（ミラー vs 分散） | `tmp/fncl_mnist_fidelity_decomp.py` | `tmp/out/fncl_a1b/`, `tmp/out/a1b.log` |
+| A1c 実学習（250 枚） | `tmp/fncl_mnist_train.py` | `tmp/out/fncl_a1c/`, `tmp/out/a1c.log` |
+| A1d 汎化（1000/1000） | `tmp/fncl_mnist_train.py --n-test` | `tmp/out/fncl_a1d/`, `tmp/out/a1d.log` |
+| A1e 多変量ミラー | `tmp/fncl_mnist_mirror_variants.py` | `tmp/out/fncl_a1e/`, `tmp/out/a1e.log` |
+| A1f ブロック対角掃引 | `tmp/fncl_mnist_mirror_variants.py --modes blk*` | `tmp/out/fncl_a1f/`, `tmp/out/a1f.log` |
+| A2 競合手法ベースライン | `tmp/fncl_baselines.py` | `tmp/out/fncl_a2/`, `tmp/out/a2_{sin,bench}.log` |
+| A2b 忠実度比較（FA/DFA） | `tmp/fncl_baselines_fidelity.py` | `tmp/out/fncl_a2b/`, `tmp/out/a2b.log` |
 
 いずれも `.venv/bin/python` で実行し，`--quick` で動作確認できる．
-`tmp/fncl_a1c.py` は `train_cov` がスカラー出力・MSE 前提であるため，
+`tmp/fncl_mnist_train.py` は `train_cov` がスカラー出力・MSE 前提であるため，
 **交差エントロピー・多出力版の `cov_jac` 学習ループを新規実装**したものである
 （学習則そのものは原稿 §4.3 と同一）．MNIST は `tmp/data/mnist/` に自動取得される．
 
@@ -659,7 +659,7 @@ $(\eta_t, \eta_{t+1})$ のみに由来する．ユニット間で $\eta$ は独�
 Adam lr $10^{-3}$）．到達目標は **`diag` 0.815 と `mv_all` 0.871 の差をどこまで埋めるか**，
 上限は backprop 0.876．
 
-- **S0 機構の定量**（`tmp/fncl_nf0.py`）．層別に $\rho$ の非対角分布，
+- **S0 機構の定量**（`tmp/fncl_noisefield_corr.py`）．層別に $\rho$ の非対角分布，
   $\mathrm{Var}(z)$ の共有／私的分解，$\bar\phi'$ の符号分布，$\rho$ の固有値スペクトルを測る．
   確認事項は (i) 第 1 隠れ層で $\rho \approx 0$，(ii) 層番号・epoch に対し単調増加，
   (iii) **スペクトルが低ランク**（L3/L5 の設計根拠かつ §5.3 の裏づけ）．
@@ -689,7 +689,7 @@ S2 で汎化が伸びなければ L5（低ランク補正）に移り，$O(Hk^2)
 
 ## 6. S0 の結果: 層内相関は「ランク 1 の一様な共通モード」だった
 
-`tmp/fncl_nf0.py` → `tmp/out/fncl_nf0/`, `tmp/out/nf0b.log`
+`tmp/fncl_noisefield_corr.py` → `tmp/out/fncl_nf0/`, `tmp/out/nf0b.log`
 （MNIST 1000 枚で backprop 事前学習した 784-256×4-10 の上で，256 枚・$T=64$・4 パスで測定．
 時間方向の順列で帰無分布を作り，有限サンプルのノイズフロアを較正した）
 
@@ -771,7 +771,7 @@ S1 ではこれ（`cm` / `rank1`）と L3（`per<p>`）を同一のネット上�
 
 ## 7. S1 の結果: 安価な代数的近似はすべて失敗し，ノイズ設計だけが効く
 
-`tmp/fncl_nf1.py` → `tmp/out/fncl_nf1b/`, `tmp/out/nf1b.log`
+`tmp/fncl_noisefield_screen.py` → `tmp/out/fncl_nf1b/`, `tmp/out/nf1b.log`
 （400 epoch 学習後の depth 4 の上で，学習し直さずに「ミラーの測り方」だけを差し替えた．
 256 枚・$T=64$・4 パス．`fwd CE` と `ens.std` はその介入下での推論の質）
 
@@ -798,7 +798,7 @@ $g$ が負荷 $s$ の方向を向かない．正しくは自己項を引いた l
 $b_i := \mathrm{Cov}(z_i, \textstyle\sum_k z_k) - \mathrm{Var}(z_i) = s_i(S - s_i)$
 を使う（$S=\sum_k s_k$；$O(H)$ で計算できる）．
 これを一様負荷（`unif`）と不均一負荷の不動点反復（`r1lo`）の 2 通りで実装し直した
-（`tmp/fncl_nf.py::cov_weight_rank1`）．
+（`tmp/fncl_noisefield_lib.py::cov_weight_rank1`）．
 
 **合成データでの単体検証**（$z = sf + e$ で $s$ を既知に取り，$d = Wz$）:
 
@@ -891,7 +891,7 @@ $r$ を 0.963 → 0.996 に戻す．S2 でこれを実学習に組み込む．
 
 ## 8. S2 の結果: ノイズ設計だけで backprop とのパリティが回復した
 
-`tmp/fncl_nf2.py` → `tmp/out/fncl_nf2/`, `tmp/out/nf2.log`
+`tmp/fncl_noisefield_train.py` → `tmp/out/fncl_nf2/`, `tmp/out/nf2.log`
 （A1e と完全に同一のプロトコル: depth 4, train 1000 / test 1000, 400 epoch, $T=64$,
 Adam lr $10^{-3}$, 同一初期重み, seed 0）
 
@@ -1061,13 +1061,36 @@ depth 2/3 と一様ノイズでの再現（S3 の残り），および seed 数�
 
 | 内容 | スクリプト | 出力 |
 |---|---|---|
-| 共通部（周期ノイズ層・位相内中心化・共通モード除去） | `tmp/fncl_nf.py` | – |
-| S0 機構の定量 | `tmp/fncl_nf0.py` | `tmp/out/fncl_nf0/`, `nf0.log`, `nf0b.log` |
-| S1 介入のオフライン選別 | `tmp/fncl_nf1.py` | `tmp/out/fncl_nf1{,b,c}/`, `nf1*.log` |
-| S2/S3 本番学習（3 seed） | `tmp/fncl_nf2.py` | `tmp/out/fncl_nf2/`, `fncl_nf3_s{1,2}/` |
-| backprop 参照（3 seed） | `tmp/fncl_a1c.py` | `tmp/out/fncl_a1d{,_s1,_s2}/` |
+| 共通部（周期ノイズ層・位相内中心化・共通モード除去） | `tmp/fncl_noisefield_lib.py` | – |
+| S0 機構の定量 | `tmp/fncl_noisefield_corr.py` | `tmp/out/fncl_nf0/`, `nf0.log`, `nf0b.log` |
+| S1 介入のオフライン選別 | `tmp/fncl_noisefield_screen.py` | `tmp/out/fncl_nf1{,b,c}/`, `nf1*.log` |
+| S2/S3 本番学習（3 seed） | `tmp/fncl_noisefield_train.py` | `tmp/out/fncl_nf2/`, `fncl_nf3_s{1,2}/` |
+| backprop 参照（3 seed） | `tmp/fncl_mnist_train.py` | `tmp/out/fncl_a1d{,_s1,_s2}/` |
 
-`tmp/fncl_nf.py` の要点は 2 つ．(i) 交差活性は隣接サンプル間の XOR なので，
+**スクリプトの改名（2026-07-31）**: 当初の連番名（fncl_a1*, fncl_a2*, fncl_nf*）は
+説明的な名前に改名した．**出力ディレクトリ `tmp/out/` は旧名のまま**である
+（記録済み結果との対応を保つため）．対応表:
+
+| 旧名 | 新名 | 出力先（旧名のまま） |
+|---|---|---|
+| `fncl_a1.py` | `fncl_mnist_fidelity.py` | `tmp/out/fncl_a1/` |
+| `fncl_a1b.py` | `fncl_mnist_fidelity_decomp.py` | `tmp/out/fncl_a1b/` |
+| `fncl_a1c.py` | `fncl_mnist_train.py` | `tmp/out/fncl_a1c/`, `fncl_a1d{,_s1,_s2}/` |
+| `fncl_a1e.py` | `fncl_mnist_mirror_variants.py` | `tmp/out/fncl_a1e/`, `fncl_a1f/` |
+| `fncl_a2.py` | `fncl_baselines.py` | `tmp/out/fncl_a2/` |
+| `fncl_a2b.py` | `fncl_baselines_fidelity.py` | `tmp/out/fncl_a2b/` |
+| `fncl_nf.py` | `fncl_noisefield_lib.py` | –（共通部） |
+| `fncl_nf0.py` | `fncl_noisefield_corr.py` | `tmp/out/fncl_nf0/` |
+| `fncl_nf1.py` | `fncl_noisefield_screen.py` | `tmp/out/fncl_nf1{,b,c,_uni}/` |
+| `fncl_nf2.py` | `fncl_noisefield_train.py` | `tmp/out/fncl_nf2/`, `fncl_nf3_s*/`, `fncl_nf_d*/`, `fncl_nf_uni_s*/` |
+| `fncl_nf_fig.py` | `fncl_results_fig.py` | `tmp/out/fncl_figs/` |
+
+**図**: 主要結果の図は `tmp/fncl_results_fig.py` が `results.json` 群から生成する
+（`tmp/out/fncl_figs/`）: 学習曲線 `fig_curves_depth4`，ミラー r の推移
+`fig_mirror_depth4`，層深依存性 `fig_depth_bar`，FA/DFA 忠実度 `fig_fidelity_bar`，
+ミラー推定量の介入比較 `fig_screening_bar`．
+
+`tmp/fncl_noisefield_lib.py` の要点は 2 つ．(i) 交差活性は隣接サンプル間の XOR なので，
 **連続区間でのブロック凍結はユニットを殺す**．周期タイル化
 （$\eta_t = \eta_{t \bmod p}$）でなければならない．
 (ii) 位相クラスは**パス境界を跨いではならない**（`phase_center` の `pass_len`）．
