@@ -77,6 +77,16 @@ async def dump_mem(ctx, rps, R):
     return out
 
 
+async def dump_vec(ctx, rp, n):
+    """単一 Memory (H 長ベクトル) を読み戻す."""
+    out = []
+    for a in range(n):
+        ctx.set(rp.addr, a)
+        await ctx.tick()
+        out.append(ctx.get(rp.data))
+    return out
+
+
 def run_rtl(L, n_pres, pq0, cfg, pres, snaps, seeds0, seeds1):
     R = H // L
     params = {"W0": pq0["W0"].view(-1).tolist(), "b0": pq0["b0"].tolist(),
@@ -92,19 +102,28 @@ def run_rtl(L, n_pres, pq0, cfg, pres, snaps, seeds0, seeds1):
     async def check(ctx, k, snap):
         pq, vel = snap["pq"], snap["vel"]
         for name, sigs, gold in [
-                ("W0", core.w0, pq["W0"].view(-1)), ("b0", core.b0, pq["b0"]),
                 ("b1", core.b1, pq["b1"]),
-                ("Wout", core.wout, pq["Wout"].view(-1)),
-                ("v_wout", core.v_wout, vel["Wout"].view(-1)),
-                ("v_w0", core.v_w0, vel["W0"].view(-1)),
-                ("v_b0", core.v_b0, vel["b0"]),
-                ("v_b1", core.v_b1, vel["b1"]),
-                ("Mos", core.mos, snap["Mos"].view(-1))]:
+                ("Wout", core.wout, pq["Wout"].view(-1))]:
             got = [ctx.get(s) for s in sigs]
             want = [int(v) for v in gold]
             assert got == want, f"L={L} p{k} {name}: {got} != {want}"
+        # RAM 化されたベクトル (w0/b0/mos/v_all) は dbg ポートで読み戻す
+        vall = await dump_vec(ctx, core.dbg_rp["vall"][0], 4 * H + 1)
+        for name, got, gold in [
+                ("W0", await dump_vec(ctx, core.dbg_rp["w0"][0], H),
+                 pq["W0"].view(-1)),
+                ("b0", await dump_vec(ctx, core.dbg_rp["b0"][0], H),
+                 pq["b0"]),
+                ("Mos", await dump_vec(ctx, core.dbg_rp["mos"][0], H),
+                 snap["Mos"].view(-1)),
+                ("v_b1", vall[0:H], vel["b1"]),
+                ("v_wout", vall[H:2 * H], vel["Wout"].view(-1)),
+                ("v_w0", vall[2 * H:3 * H], vel["W0"].view(-1)),
+                ("v_b0", vall[3 * H:4 * H], vel["b0"])]:
+            want = [int(v) for v in gold]
+            assert got == want, f"L={L} p{k} {name}: {got} != {want}"
         assert ctx.get(core.bout) == int(pq["bout"][0])
-        assert ctx.get(core.v_bout) == int(vel["bout"][0])
+        assert vall[4 * H] == int(vel["bout"][0])
         assert ctx.get(core.y) == snap["y"], f"L={L} p{k} y"
         # Memory: ROW 側は [j][i] 直、COL 側 (m1s/vmr) は転置比較
         w1 = await dump_mem(ctx, core.dbg_rp["w1"], R)
