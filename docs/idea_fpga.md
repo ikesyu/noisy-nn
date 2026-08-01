@@ -626,7 +626,43 @@ COMB 残余 45% は Phase 4 の通信ラッパ等に使える。
    実体化、Verilator 大規模検証、評価ボード（ECP5-85: ECP5-EVN / ULX3S 85F
    等）調達 → 1 次元回帰のオンチップ学習実証。
 
-## 7. 再現コマンド
+## 7. 環境準備
+
+### WSL2 側（設計・検証: Amaranth / ゴールデンモデル / オープンフロー）
+
+- **OSS CAD Suite**: tgz を `/opt/oss-cad-suite` に展開し、使うツールだけ
+  `/usr/local/bin` に **exec ラッパスクリプト**として配置
+  (`#!/bin/sh` + `exec /opt/oss-cad-suite/bin/<tool> "$@"`)。
+  シンボリックリンクは起動スクリプトがルート解決を誤り**全滅する**ので不可。
+  `bin/` 全体の PATH 追加も同梱 Python が .venv と衝突するため避ける。
+- **build-essential**（make/g++。Verilator の TB 実行に必須）: `sudo apt-get
+  install -y build-essential`
+- Python: リポジトリの `.venv`（amaranth 0.5 + amaranth-yosys 導入済み）。
+- ECP5 向け合成・P&R はこの環境で完結（§6 Step 4 の再現コマンド参照）。
+
+### Windows 側（CertusPro-NX: 合成・P&R・書き込み）
+
+CertusPro-NX はオープンフロー（nextpnr-nexus）の対応が未成熟のため
+**Lattice Radiant** を使う。**LFCPNX-100 は Radiant の無償ライセンスで
+ビットストリーム生成まで利用可能**（新しめのデバイスは "Evaluation Mode"
+扱いになる場合があるが費用は発生しない。ライセンスガイドの対応表で確認）。
+
+1. Lattice アカウント作成 → Radiant（Windows 版）をダウンロード・インストール
+2. Licensing ページで **Radiant free license** を申請（ノードロック =
+   ホスト NIC の MAC アドレス紐付け）→ 発行された `license.dat` を
+   ライセンスフォルダに配置（インストーラ/環境変数 `LM_LICENSE_FILE`）
+3. ボード接続 → Radiant Programmer で Scan、JTAG チェーンに LFCPNX-100 が
+   見えること（FTDI ドライバは Windows 標準で当たる想定）
+4. 設計データは WSL2 側から `/mnt/c` 経由で受け渡し（Amaranth → Verilog
+   書き出し → Radiant プロジェクトに import）
+
+### ボード（LFCPNX-EVN）
+
+ブリングアップ RTL・ピン制約・手順は `rtl/board/`（README 参照）。
+ジャンパ: 12 MHz = JP6 実装/JP3 非実装（工場出荷）、UART = JP1/JP2 を閉。
+典拠: `docs/FPGA-EB-02046-1-2-CertusPro-NX-Evaluation-Board.pdf` (v1.2)。
+
+## 8. 再現コマンド
 
 ```bash
 cd tmp

@@ -4,3 +4,4 @@ __pycache__/
 out/
 *:Zone.Identifier
 tmp/data/
+*.log
