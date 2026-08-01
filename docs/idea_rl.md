@@ -11,6 +11,7 @@
 - **Part III ― 実装と実測（§20–21）**: 学習則の自然統合を CartPole で検証（§20：Step A–C ＋ Task #1 の critic 統一）。ノイズ場を行動モードとして検証（§21：L1 addressing・報酬による自律選択・L2 多重化・連続場形成・per-unit σ 検証）。実装はすべて `tmp/`（`tmp/rl/` 共通、`tmp/rl_*` 検証）。
 - **結論（§22）**: §20–21 時点の総括と、**最も NNN-native な RL 方式**の同定と詳説。
 - **補遺（§23）― 実タスクへの展開（2026-07-20〜23、完結）**: swing-up + balance を題材に、(i) full balance の達成（§23.1–23.3）、(ii) ρ/h ゲートによる漏れなしスキル分離・保護（§23.4/23.7）、(iii) critic の完全 NNN 化（§23.5/23.8–23.9）、(iv) PPO 統合（§23.10）、(v) SAC 統合と PPO との比較（§23.11–23.12）。本補遺で「backprop ゼロの単一 NNN が主要 RL アルゴリズム群を実タスクで駆動できる」ことの検証は一区切りした。
+- **付録（§24）― 試行手法一覧**: 本レポートで試したすべての手法を、手法の説明・結果・判定つきの一覧表に整理した早見表。個別の詳細へ入る前の全体把握、または特定の実験の逆引きに使う。
 
 **主要な到達点**（詳細は各節と §22・§23.12）:
 
@@ -1712,3 +1713,63 @@ mean cos は単調に上昇し（振り上げの着実な改善）、epi 950 で
 cov_jac は (a) on-policy policy gradient（§23.1）、(b) 価値回帰 critic（§23.9）、(c) PPO の clipped surrogate（§23.10）、(d) off-policy SAC の soft-Q actor-critic（§23.11）のすべてで、backprop・転置重みなしに実タスクを解く credit を供給した。必要だった追加はどれも新機構ではなく、**supervised で実証済みの mirror 設計（EMA + KP）の正しい移植**と、**「アンサンブル平均 μ の確率性」を各アルゴリズムの統計（分散・比・clip・KL・baseline）に正しく会計すること**だけである。あわせて、ノイズ場 option は ρ/h ゲート（§23.7）により深い層でも厳密なスキル分離・保護・合成を与える。
 
 **本項目（swing-up を題材とした NNN-RL のアルゴリズム統合）はここで一区切りとする。** 残課題は次の4点に整理して引き継ぐ：(1) 多 seed 化（§23.9–23.11 はいずれも seed 0 のみ）と SAC の 1.000 持続性確認、(2) より難しい連続制御・§14.2 の行動タスクへの展開（「NNN RL が実用的に competitive」の検証）、(3) 探索温度の NNN 内部化（σ_e の撤廃・ρ 場による制御 — §21.6/§22.2(c) の未解決点）、(4) §19 の場 credit 経路の完全 forward 化（§22.2(d)）。
+
+---
+
+## 24. 付録：試行手法一覧（説明と結果・2026-07-31 整理）
+
+本レポートで実際に試した手法（対照・ablation・負の結果を含む）を、実施順に4群へ分けて一覧化する。判定の凡例：**成立** = 狙いを実測で達成、**否定** = 仮説が実測で棄却（それ自体が知見）、**部分的** = 動作するが目標未達、**対照** = 比較・ablation 用。詳細は各節を参照。
+
+### 24.1 学習則の自然統合（forward-noise credit、CartPole バランス、§20）
+
+| 手法（節） | 手法の説明 | 結果 | 判定 |
+|---|---|---|---|
+| **cov_jac forward-mirror credit・Step A**（§20.12） | policy score（logit 上の $a-p$）を top-level δ とし、forward 共分散から推定した weight mirror（`cov_weight`）と KDE crossing slope で層間へ再帰。転置重み backward を使わない。online（N=1、EMA なし単発 mirror）で autograd の $\nabla_W\log\pi$ との cosine を測定 | T=64 で cosine 0.92–0.98（H=16–256）。G1 通過。mirror 品質は T で改善し、H を上げると要求 T が増える | 成立 |
+| **Step B 完全ループ**（§20.13） | cov_jac credit ＋ eligibility trace（γλ 減衰）＋ TD 誤差変調 ＋ EMA/KP online mirror ＋ 線形 TD critic（外付け・minimal）。SGD・観測正規化 | CartPole-v1 を greedy return 500（満点）まで学習。外部 RL アルゴリズム・backprop なしの最初の実証。Adam は trace と相性が悪く不安定、SGD が安定 | 成立 |
+| **true-transpose oracle**（§20.12） | 同じ再帰で mirror を真の転置重みに置換した上界対照 | cosine 0.92–0.995（T 依存のみ、H 不依存）。残差は KDE slope の T 依存分＝再帰の実装は正しい | 対照 |
+| **node perturbation（出力相関版）**（§20.13） | 各 unit 摂動を出力 logit に直接相関させる flat credit（mirror・再帰なし）。同じ trace/TD 骨格に credit 源のみ差し替え | 分散比 node/cov = 0.71–0.99 で cov_jac は分散で勝たず、学習曲線も重なる。§18-C の「分散優位」の主張は撤回（→ ablation と位置づけ直し） | 対照（優位は否定） |
+| **backprop actor-critic**（§20.13） | 標準の backprop による上界対照 | 学習曲線は cov_jac・node_pert と重なり区別できない（2 seed・CartPole 規模） | 対照 |
+| **SR sweep（Step C）**（§20.16） | ノイズ強度 σ を 0.05–2.0 に掃引し、mirror cosine（計算忠実度）・探索・到達 return の最適領域の重なりを検証 | 学習後重みでは最良制御の σ（0.6–1.3）と最良 credit の σ（0.1）が一致せず、「単一 σ が全役割を同時最大化」は不成立。ただし副次発見として **RL は低忠実度 credit に頑健**（cosine 0.44 でも return 500） | 否定（弱い主張は成立） |
+| **Task #1: critic 統一（共有 body）**（§20.17） | 単一 NNN body に action/value 両 readout を載せ、value 誤差も同一の forward mirror 再帰で body へ流す（外部 scaffolding ゼロ） | 機構としては閉じ、value credit は共有 body を助ける（coef を下げると悪化）。ただし性能は外付け線形 critic に明確に劣る（peak 226–241 vs 318–413） | 部分的 |
+
+### 24.2 ノイズ場を行動モード（option）とする検証（1D MultiModeReach、§21）
+
+| 手法（節） | 手法の説明 | 結果 | 判定 |
+|---|---|---|---|
+| **固定 spatial 場で SR 対立の打破**（§21.1） | per-unit の固定場（uniform lo/mid/hi、split、graded）で CartPole を学習し、return–cosine 対立フロンティアを空間配分で抜けられるか検証 | split は劣位支配、graded は uniform_hi と同点。単一タスク・均質 readout では σ の空間配分は対立を解かない | 否定 |
+| **disjoint recruitment 場による L1 addressing**（§21.2） | 隠れレジーム（±1 どちらのターゲットか観測に含めない）の 1D reach で、2つの disjoint 場 prototype を切替。episodic REINFORCE ＋ per-timestep baseline、credit は forward mirror | 場 P_0 固定で全軌道が −1.01±0.09、P_1 固定で +1.03±0.08 へ。**終点は場だけで決まる**＝同一重みのまま場が行動をアドレス（front_comp L1 の RL 版） | 成立 |
+| **報酬による場の自律選択**（§21.3） | softmax 選択器 `theta[context, field]` が文脈から場をエピソード毎に選択、本体と同時学習。prototype に意味は事前付与しない | 選択器が完全対角（ctx0→P0=1.00、ctx1→P1=1.00）に自己組織化し、両文脈とも正しいターゲットへ。本体は SGD なら安定（Adam は後期崩壊） | 成立 |
+| **重なり場での多重化（損傷実験）**（§21.4） | 重なる2場（共有 26 unit、Jaccard 0.41）で 2 行動を学習後、unit 群ごとに readout 列をゼロ化して分割か多重化かを判定。単一隠れ層（σ-only ゲートが厳密に効く条件） | 共有群の損傷で**両行動が同時崩壊**（+0.94/+1.00）、専用群は片側のみ、random 対照は小＝多重化の署名（front_comp L2 の RL 版）。副産物：2 層では σ-only recruitment が漏れる（→ §23.7 の ρ/h で解決） | 成立 |
+| **連続場中心の報酬学習と補間**（§21.5） | prototype を与えず、連続の場中心 c∈[0,1]（Gaussian bump）を場レベル REINFORCE（$u_{\mathrm{mod}}=\Xi^{-1}\xi$、§19.3）で学習 | 対称初期（両中心 0.5）から報酬が対称性を破り μ_c=[0.97, 0.18] へ分化。学習後に c を掃引すると終点が滑らかに遷移し、**c≈0.55 で未学習の中間行動**＝連続 option 座標 | 成立 |
+| **per-unit σ eligibility**（§10/§21.6） | $\psi_\sigma=g\,\phi_T'\,(-d/\sigma)$（教科書形）と forward 推定形で per-unit σ を policy-score から直接 credit | 独立 2 pass 間 cosine ≈ −0.04（ノイズ支配）、200 pass 平均の norm ~0：$\mathbb E[\partial\log\pi/\partial\sigma]\approx0$ で **ill-posed**。場は低次元 recruitment 座標として学習するのが正しいことを裏づけ | 否定（明確化） |
+
+### 24.3 実タスク展開：CartPole swing-up + balance（§23–23.9）
+
+| 手法（節） | 手法の説明 | 結果 | 判定 |
+|---|---|---|---|
+| **bang-bang episodic REINFORCE**（§23 無印） | 2 行動（±F）・cov_jac credit・per-timestep baseline・カリキュラム・エネルギー報酬・壁張り付きペナルティ | 本物のポンピングを獲得し頂点まで振り上げ（cos_max=1.0）るが、安定化せず（frac_upright≈0.2）。bang-bang（no-op なし）の構造的限界 | 部分的 |
+| **連続力 NNN actor ＋ 外付け MLP critic（A2C+GAE）**（§23.1） | actor は連続 Gaussian 方策（score $(a-\mu)/\sigma^2$ を cov_jac が伝播）、critic のみ backprop MLP に割り切り。探索 σ_e は固定＋アニール | **last100_up = 1.00（full balance）達成**（upd350+）。cov_jac が backprop 相当の policy credit として実タスクを解くことの実証 | 成立 |
+| **ノイズ場 option の multimodal actor（固定文脈ゲート）**（§23.2） | pump/balance の2場 prototype を文脈ゲート $g=\sigma(6\cos\theta)$ で連続ブレンド。重みは共有、credit は cov_jac のまま | upd275/300 で last100_up = 1.00。§21 の option 機構が実タスクで機能。方向1よりやや不安定 | 成立 |
+| **学習ゲート（modulatory core）**（§23.3） | 固定ゲートを小さな NNN core（cov_jac）に置換し、ゲートを潜在行動として同じ advantage で学習（actor 完全 NNN） | タスクは解ける（last100_up=1.00）が、**ゲートは pump/balance に自律分化しない**（ほぼ定数に収束）。分化はタスクが複数モードを genuinely 要求するときのみ創発（§21.3 と整合） | 成立（分化は否定） |
+| **スキル再利用・σ-only 凍結**（§23.4） | balance を場 A に事前学習 → A 凍結、pump を場 B に追加学習する二段継続学習（σ-only recruitment） | swing-up 部分的（0.38）、balance 保持が 1.00→0.34 に劣化。原因は σ-only ゲートの漏れ（＋不完全な凍結マスク）で、機構の限界ではない（→ §23.7 で解決） | 部分的（→解決済み） |
+| **critic の NNN 化（単発 mirror）**（§23.5） | 外付け MLP critic を NNN critic（cov_jac で GAE リターン回帰）に置換し、システム全体を backprop ゼロに | 学習はする（振り上げ・時々保持）が last100_up ピーク 0.44 で full balance 未達。critic の価値回帰の質が律速 | 部分的 |
+| **ρ/h ゲートによるスキル保護**（§23.7） | recruitment を σ-only から動員ダイヤル ρ（$\sigma=\rho\sigma_0, h=h_0/\rho$、off は h 番兵で厳密沈黙）に変更し §23.4 を再実行。olap 場（pump 時に凍結 A を read-only 語彙として全動員）も比較 | off 側 max mean z = 0.0000（厳密沈黙）、**保持 1.000（構成的）・drift 0.00e+00**。olap アームは swing-up 1.000 と保持 1.000 を両立。§23.4 の漏れは σ-only ゲートの限界だったと確定 | 成立 |
+| **共有 body ＋ 線形 value head（A）**（§23.8） | value を actor 最終隠れ層の平均活動への ridge ヘッドにする（mirror 不要・value 誤差は body に流さない） | actor の更新が特徴を動かし続け value 適合が崩壊（R² 0.88→0.01）、方策も退化（best 0.18）。教訓：critic に要るのは「actor の表現」でなく「定常で十分豊かな基底」 | 否定 |
+| **凍結ランダム NNN 特徴 ＋ ridge ヘッド（A′）**（§23.8） | critic を未訓練凍結の NNN 基底（H=256、マルチスケール行ゲイン）＋線形ヘッドに | value R² 0.93–0.99 で安定、EMA mirror（B）と併用で last100_up 1.000。ただし後に「凍結は不要」と判明（§23.9）し、mirror 誤差を消す最も乱暴な方法だったと読み替え。コードは削除済み | 成立（→読み替え） |
+| **EMA mirror ＋ Kolen–Pollack の RL 移植（B / fix 1）**（§23.8–23.9） | per-step 単発の mirror 再推定を、supervised 側で実証済みの永続 EMA mirror（β=0.1）＋ KP 追跡に置換（actor・critic 両方） | **fix 1 のみで、特徴を学習する critic のまま last100_up = 1.000**。§23.5 の律速の正体は mirror 分散と確定。以後 a2c 系のデフォルトに採用 | 成立（決定打） |
+
+### 24.4 RL アルゴリズム統合：PPO・SAC（§23.10–23.12）
+
+| 手法（節） | 手法の説明 | 結果 | 判定 |
+|---|---|---|---|
+| **PPO v1：素朴移植**（§23.10） | clipped surrogate ＋ エポック再利用を §23.9 構成にそのまま載せる | アンサンブル平均 μ の推定ノイズ σ_μ だけで比が揺れ、clip_frac≈0.5 で勾配が死に方策凍結 | 否定（負の結果） |
+| **PPO v2：ノイズ会計**（§23.10） | (i) 周辺分散 var_t=σ_e²+σ_μ² で score/比を計算、(ii) clip 閾値にノイズ不感帯 $\epsilon_t=\epsilon+2\sigma_{\log r}$、(iii) 勾配の r をクランプ | 凍結解消・upd50 で full balance（A2C の約5倍のサンプル効率）だが、直後に定数行動アトラクタへ崩壊（trust region 踏み越え＋クランプ後行動保存のバグ） | 部分的（負の結果） |
+| **PPO v3：KL 早期停止**（§23.10） | (iv) ノイズ床込み KL>0.02 でバッチの残エポック打ち切り、(v) クランプ前行動を score から復元 | upd75–250 の8連続 ckpt で 1.000 維持。ただし σ_e が 0.1 までアニールし切る終端で KL 暴騰・崩壊 | 部分的 |
+| **PPO v4（canonical）**（§23.10） | v3 ＋ 探索 σ_e の下限 0.2 | **upd75–300 の10連続 ckpt すべて 1.000・崩壊なし**。best-ckpt 選択不要、value R² 0.89–0.92 で安定、A2C 比 3–5 倍速。振動問題は解消 | 成立（canonical） |
+| **SAC v1：素朴移植**（§23.11） | twin-Q NNN critic（cov_jac TD 回帰）＋ score-function actor ＋ running 目標標準化 | bootstrap 目標が脱標準化した critic 自身を通り正帰還で TD 発散（Qmin→−10¹⁴）。修正＝固定 reward scale ＋ TD 目標クランプ | 否定（負の結果） |
+| **SAC v2：バッチ平均 baseline**（§23.11） | 重み $w=Q(s,a)-\overline Q_{\rm batch}$ で actor 更新 | baseline が状態価値の差に支配され actor が学習しない。修正＝状態ごとに K 本サンプルの状態内 baseline（leave-one-out） | 否定（負の結果） |
+| **SAC v3/v4：fresh サンプル方式**（§23.11） | 現在方策から新規サンプルした行動で actor 信号を作る（antithetic 対・Q の 2 パス平均も試行） | ハングは脱出するが壁アトラクタで停滞（best 0.21–0.38）。μ 近傍の Q 行動感度が評価ノイズ＋回帰残差に埋もれる SNR 限界 | 否定（負の結果） |
+| **SAC v5：replay 行動係留 ＋ noise-deadband 比**（§23.11） | actor 信号を実行済み replay 行動の soft advantage $A=Q(s,a_{\rm replay})-\overline{Q(s,a_k)}_K$ に係留し、off-policy 補正は §23.10 処方 (ii) の noise-deadband 付き重要度比 | **epi1000（~40 万 steps）で last100_up = 1.000**。backprop・転置重み・reparameterization なしの SAC が実現可能と確認。ただし持続性未確認・PPO 比約 4 倍遅い | 成立（feasible） |
+| **PPO vs SAC 比較**（§23.12） | 同一タスク・同一の完全 NNN 構成での対決 | PPO が全面で優位（到達 ~9 万 vs ~40 万 steps）。理由は SAC の効率の源泉 reparameterization が backprop フリー制約で禁じられるため。**NNN では PPO 系が構造的に有利**が主結論 | 結論 |
+
+**横断的な実装知見**（表の複数行に共通）: (1) forward-mirror 系は **SGD が堅く Adam は不安定**（§20.13/§21.3）。(2) **観測正規化が必須**（§20.13）。(3) mirror は**永続 EMA ＋ KP 追跡**が正しい設計で、per-step 単発推定は RL では律速になる（§23.9）。(4) NNN を ratio ベース RL に載せる際は「**アンサンブル平均 μ が確率的**」であることの統計的会計（周辺分散・ノイズ不感帯・KL ノイズ床）が本質的な移植作業（§23.10 処方 (i)–(v)、SAC でも再利用）。
