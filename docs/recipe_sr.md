@@ -5,9 +5,17 @@
 **逆U字（単峰）カーブ**で示す。ルックアップ鍵には最適強度が存在しないため、内点に
 最適ノイズ強度が現れれば、この批判に対する直接的な反証になる。
 
-対象コード: [`examples/sr_separation_curve.py`](../examples/sr_separation_curve.py)
-（挙動デモ [`examples/neuromodulated_behavior_modes.py`](../examples/neuromodulated_behavior_modes.py)
+対象コード: [`tmp/sr_separation_curve.py`](../tmp/sr_separation_curve.py)
+（挙動デモ [`tmp/neuromodulated_behavior_modes.py`](../tmp/neuromodulated_behavior_modes.py)
 の学習・データ・ノイズ場をそのまま再利用する診断スクリプト）。
+
+> ※ 旧稿は両ファイルを `examples/` 配下として参照していたが、実体は `tmp/` にある
+> （`examples/` にはどちらも存在せず、旧記載のコマンドはそのままでは実行できない）。
+> 本稿のパス・コマンドはすべて `tmp/` に修正済み。
+
+**正典**: 記号・定義は `docs/idea_core.md` に従う。本稿で特に効くのは
+§2.6（SR は sample 水準にしか存在しない）、§3.4（σ=0 リークと第 1 隠れ層限定）、
+§3.5（動員ダイヤル $\rho$ と kill 三点操作）、§4（ゲージ対称性と禁止事項）である。
 
 ---
 
@@ -25,7 +33,7 @@
 環境確認（数十秒の最小実行）:
 
 ```bash
-python examples/sr_separation_curve.py --epochs 60 --grid-side 13 --s-steps 9
+python tmp/sr_separation_curve.py --epochs 60 --grid-side 13 --s-steps 9
 ```
 
 ---
@@ -34,14 +42,39 @@ python examples/sr_separation_curve.py --epochs 60 --grid-side 13 --s-steps 9
 
 - **横軸 = ノイズ強度**: 動員された隠れユニットのピーク std（＝神経修飾物質“濃度”の代理）。
   CSV では `--sweep test` なら列名 `test_s`、`--sweep train` なら `sigma_train`。
+  掃引されるのは **`--base-std`（test スイープ）／各点の学習水準（train スイープ）** であって、
+  `--sigma`（バンプの空間的広がり）ではない（§8 の注記）。
 - **縦軸（3指標、CSV の 2〜4 列）**:
   - `separation` — 3つのノイズ場が生む出力ベクトル場どうしの平均ペア距離（＝**候補2**、
     「各場がどれだけ別々の行動を動員するか」）。
   - `signal` — 出力の**刺激依存成分**（観測ごとの変動、各場の平均を引いた量）。SRで単峰に
-    なるべき本命量：`→0`（ユニット未動員）と過大（交差飽和で定数化）で 0 に向かう。
+    なるべき本命量：`→0`（低ノイズ端＝しきい値下で交差が起きず出力が消える）と
+    過大（交差飽和で定数化）で 0 に向かう。
   - `task_err` — 学習目標（近似 one-hot 行動場）への MSE（低いほど良、参照用）。
 
 内点にピーク（`signal`/`separation`）または内点に谷（`task_err`）が出れば SR の単峰。
+ただしこの判定が意味を持つのは **sample 水準**に限る（正典 `idea_core.md` §2.6。§3 の注記も参照）。
+
+> **注記（σ=0 は「ユニットの切り離し」ではない）**: 本スクリプトのノイズ場は
+> `--theta`（**以下 θ_cut と読む**。正典 `idea_core.md` §1.1 の $\theta=\{W,b\}$ と記号が衝突するため。
+> CLI 引数名そのものは変更しない）で強度を切り捨て、σ_k=0 のユニットを作る。
+> しかしこれを「ユニットが未動員／detach された」と読んではいけない。理由は 2 つある。
+>
+> 1. **層のスコープ**: 実装（`tmp/neuromodulated_behavior_modes.py: evaluate_vector_field`）は
+>    `net(obs, stds=[field, field])` と、**同一の場を隠れ 2 層の両方に**適用している
+>    （モデルは `structure=[6, H, H, 2]`、交差しきい値 `h` は両層共通の大域定数）。
+>    σ_k=0 が理想形どおり $z\equiv0$ を与えるのは **第 1 隠れ層だけ**であり、
+>    第 2 隠れ層では上流のサンプルゆらぎが $\pm h$ をまたぐため σ_k=0 でも交差が残る
+>    （「σ=0 リーク」、実測 $\nu=0.11$–$0.17$ のプラトー。`idea_core.md` §3.4）。
+>    厳密に沈黙させるには σ_k←0 に加えて **h_k←H_DEAD=10⁶** と下流列 $W^{(l+1)}[:,k]\leftarrow0$ が要る
+>    （kill の三点操作。`idea_core.md` §3.5）。
+> 2. **測り方**: 参加／不参加を **σ の絶対値のしきい値判定で決めてはいけない**。σ の絶対値は
+>    ゲージ依存量であり、参加度はゲージ不変な**交差率 $\nu_k=\mathbb E[z_k]$** で測る
+>    （`idea_core.md` §3.3, §4.3, §4.8）。
+>
+> したがって θ_cut は「場の空間的な支持を切り出すためのバンプ裾の切り捨て」であって、
+> ユニットの退役操作ではない。`--model analytic` では期待応答が σ→0 で（$d\neq0$ なら）層によらず 0 に
+> 収束するので理想形と一致するが、本命図の `--model sample` は上の限定を受ける。
 
 ---
 
@@ -59,10 +92,28 @@ python examples/sr_separation_curve.py --epochs 60 --grid-side 13 --s-steps 9
 - `sample`: **実ノイズ注入**＋`t` サンプル平均、閾値 `h>0` ＝**本物のSR機構**。やや遅い。
 - `statistic`: サンプル応答のモーメント推定（`h`, `t` を使用）。
 
+> **`t` は時間ではない。** CLI の `--samples`（コード上の `t`）は正典の $T$、すなわち
+> **1 入力あたりの確率的 forward サンプル数**である（`idea_core.md` §1.1, §3.1）。
+> 時間発展・時間相関ノイズは本スクリプトには存在しない。
+
 > **実測済みの重要な区別**: `--sweep train` では、
 > - `--model analytic` は**低σ端で最適**（低σでも重み再スケールで学習でき、真のSR障壁なし＝平均場）。
 > - `--model sample` は**内点最適**（σ\*≈0.8–1.2）で、低σ側が実際に崩壊（閾値下は伝達不能）。
 > → **論文の“厳密なSR図”は `--sweep train --model sample`**、`analytic` はその対照。
+>
+> **この内点最適が成立する体制を明示すること**（正典 `idea_core.md` §4.7）。`--sweep train` は
+> `--crossing-h`（既定 0.2）を**大域ハイパーパラメータとして固定したまま** σ だけを掃引し、
+> 各点で θ={W,b} を再学習する ＝ **体制 (b)（h 固定 + θ 学習、ゲージ不在、σ は本物の DOF）**である。
+> もし $h\propto\sigma$ と連動させれば掃引は純粋な**ゲージ軌道**になり（$h/\sigma$ 一定 → $\nu$ 不変、
+> `idea_core.md` §4.6）、曲線は平坦化して内点最適そのものが定義上消える。
+> したがって報告時はゲージ不変な比 **$h/\sigma^*\approx0.17$–$0.25$**（$h=0.2$、$\sigma^*=0.8$–$1.2$）を併記し、
+> σ\* の絶対値だけを主張の担い手にしないこと（σ の絶対値はゲージ依存量、§4.3）。
+> なお `--sweep test` 側が「学習水準近傍で最小」になるのは別の理由（θ 凍結＝**体制 (c)**＋§9 の交絡）である。
+
+> **SR 判定はモデル非依存ではない**（正典 `idea_core.md` §2.6）。SR は **sample 水準にしか存在しない**。
+> `analytic`（平均場）は低 σ 端最適でしきい値下の障壁を持たないので、内点最適が出ないことは
+> 失敗ではなく**予測どおりの対照**である。`statistic` 水準での SR の有無は**未検証**であり、
+> 「内点にピークが出れば SR」という §2 の読み方をそのまま `statistic` に適用してはいけない。
 
 ---
 
@@ -73,7 +124,7 @@ python examples/sr_separation_curve.py --epochs 60 --grid-side 13 --s-steps 9
 
 ### R1. 厳密なSR（本命）— sample × 学習水準スイープ
 ```bash
-python examples/sr_separation_curve.py \
+python tmp/sr_separation_curve.py \
     --sweep train --model sample \
     --grid-side 25 --epochs 1500 --train-steps 15 \
     --s-min 0.1 --s-max 4.0 --samples 96 --crossing-h 0.2 --seed 7 \
@@ -83,7 +134,7 @@ python examples/sr_separation_curve.py \
 
 ### R2. 対照（平均場＝SRなし）— analytic × 学習水準スイープ
 ```bash
-python examples/sr_separation_curve.py \
+python tmp/sr_separation_curve.py \
     --sweep train --model analytic \
     --train-steps 15 --s-min 0.1 --s-max 4.0 --seed 7 \
     --save data/sr_train_analytic_seed7.csv --no-show
@@ -92,10 +143,10 @@ python examples/sr_separation_curve.py \
 ### R3. テスト時スイープ（高速・逆U字の補助図）
 ```bash
 # 平均場（既定・最速）
-python examples/sr_separation_curve.py --s-max 4.0 --s-steps 60 --seed 7 \
+python tmp/sr_separation_curve.py --s-max 4.0 --s-steps 60 --seed 7 \
     --save data/sr_test_analytic_seed7.csv --no-show
 # 機構（sample）
-python examples/sr_separation_curve.py --model sample \
+python tmp/sr_separation_curve.py --model sample \
     --grid-side 21 --epochs 1500 --samples 96 --s-max 4.0 --s-steps 60 --seed 7 \
     --save data/sr_test_sample_seed7.csv --no-show
 ```
@@ -103,7 +154,7 @@ python examples/sr_separation_curve.py --model sample \
 ### R4. seed 頑健性（複数シード）— R1 を seed 掃引
 ```bash
 for s in 0 1 2 3 4; do
-  python examples/sr_separation_curve.py --sweep train --model sample \
+  python tmp/sr_separation_curve.py --sweep train --model sample \
     --grid-side 21 --epochs 1000 --train-steps 11 --s-min 0.1 --s-max 4.0 --samples 64 \
     --seed $s --save data/sr_train_sample_seed$s.csv --no-show
 done
@@ -133,7 +184,7 @@ train-sweep summary (sample):
 
 | 図 | 使う CSV | 描く列（縦軸） vs 横軸 | 主張 |
 |---|---|---|---|
-| **Fig 1 厳密なSR** | `sr_train_sample_seed7` | `task_err` と `signal` vs `sigma_train` | 内点最適＋低σ崩壊＝真のSR |
+| **Fig 1 厳密なSR** | `sr_train_sample_seed7` | `task_err` と `signal` vs `sigma_train` | 内点最適＋低σ崩壊＝真のSR（**h=0.2 固定＝体制 (b)**。キャプションに明記し、$h/\sigma^*\approx0.17$–$0.25$ を併記） |
 | **Fig 2 機構 vs 平均場** | `sr_train_sample_*` ＋ `sr_train_analytic_*` | `signal` vs std を**重ね描き** | sample=内点、analytic=低σ端（障壁なし） |
 | **Fig 3 候補2：場の分離度** | 任意の train/test CSV | `separation` vs std | ノイズ強度が場の“区別度”を決め最適点をもつ |
 | **Fig 4 テスト時の逆U字** | `sr_test_sample_*`（or analytic） | `separation` と `signal` vs `test_s` | 1ネットでの逆U字（安価な補助図） |
@@ -191,16 +242,22 @@ plt.show()
 | `--sweep` | `test` | `test`=テスト時掃引 / `train`=学習水準掃引（厳密） |
 | `--model` | `analytic` | `analytic`(平均場) / `sample`(真のSR) / `statistic` |
 | `--train-steps` | 13 | 学習水準スイープの点数（train のみ） |
-| `--crossing-h` | 0.2 | 交差閾値（sample/statistic）。**SRには `h>0` 必須** |
-| `--samples` | 64 | モンテカルロ標本数 `t`。大きいほど滑らか・遅い |
+| `--crossing-h` | 0.2 | 交差閾値 $h$（sample/statistic）。**SRには `h>0` 必須**。掃引中は**大域固定**＝体制 (b)（§3） |
+| `--samples` | 64 | 確率的 forward **サンプル数** $T$（コードの `t`）。**時間ではない**。大きいほど滑らか・遅い |
 | `--epochs` | 3000 | 1ネットの学習エポック |
 | `--grid-side` | 31 | 学習グリッド解像度（大きいほど重い） |
-| `--base-std` | 0.8 | test スイープでの学習水準 |
-| `--sigma` / `--theta` | 0.22 / 0.15 | ノイズバンプ幅 / 強度切り捨て閾値 |
-| `--s-min`/`--s-max`/`--s-steps` | 0.0/3.0/41 | 掃引範囲・点数（横軸） |
+| `--base-std` | 0.8 | test スイープでの学習水準（＝**ノイズ強度** σ の基準値） |
+| `--sigma` | 0.22 | **8×8 ユニットシート上のバンプの空間的な広がり**（場の支持の形を決める）。**ノイズ強度ではない** |
+| `--theta`（θ_cut） | 0.15 | バンプ裾の**強度切り捨て閾値**。σ_k=0 のユニットを作るが**退役操作ではない**（§2 の注記） |
+| `--s-min`/`--s-max`/`--s-steps` | 0.0/3.0/41 | 掃引範囲・点数（横軸）＝**ノイズ強度**の掃引 |
 | `--seed` | 7 | 乱数シード |
 | `--save` | なし | 掃引データを CSV 保存 |
 | `--no-show` | off | 図ウィンドウを開かない（バッチ用） |
+
+> **`--sigma` と掃引変数を取り違えないこと。** 表で隣り合っているため
+> 「σ=0.22 が最適ノイズ強度」と誤読されやすいが、`--sigma` は**バンプの空間的な広がり**であり、
+> ノイズ強度は `--base-std`（test スイープ）／`--s-min`〜`--s-max` の掃引変数（train スイープ）である。
+> 内点最適 σ\*≈0.8–1.2 は後者の軸上の値である。
 
 ---
 
@@ -211,6 +268,11 @@ plt.show()
 - **高σ側の裾**: `--s-max 3.0` だと減衰が穏やか。より明瞭な逆U字の裾には `--s-max 5.0` 程度。
 - **Analytic ≈ E[Sample] の重ね描き**: 「平均場 vs 機構」を1枚に。現状は各モデルを別々に
   学習するため厳密な同一重み比較ではない。同一重みで両応答を評価する専用診断を足すとより厳密。
+  → ※ **部分的に解決済み**（`idea_reservoir.md` §13.1 実行報告、2026-07-30）。同一重み診断が
+  リザバー文脈で実装され（analytic で学習・凍結 → 同一重みのまま大域ノイズ強度 $\kappa_\sigma$ を掃引し
+  両応答を採点）、**sample は逆 U 字（$\kappa_\sigma^*\approx0.20$–$0.23$、6 seed × 2 タスクすべて）、
+  analytic は平坦なプラトー**が確認された。本稿の train スイープ（各水準で再学習）は別系統の手法であり、
+  同一重み結果と互いに補強する（本稿の文脈での同一重み診断の実施は未着手）。
 - **行動レベルのSR（候補3）**: 閉ループの採餌効率・到達時間などを `s` の関数にし、
   「行動能力そのもの」に最適ノイズがあることを示す図（特集の主眼に最も近い）。
 

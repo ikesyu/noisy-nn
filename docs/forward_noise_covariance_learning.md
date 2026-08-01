@@ -69,6 +69,17 @@ parabola `phi_bar(d) = 0.5 [1 - ((d-c)/r)^2]_+`, whose local derivative is
 `phi_bar'(d) = -(d-c)/r^2` for `|d-c| < r` (and `0` outside). The example uses this
 derivative for `cov_deriv` when `--noise uniform`.
 
+**Noise/threshold regime used throughout this document.** The crossing half-width `h` is a
+**global hyperparameter** here (`--crossing-h`, default `0.2`); it is *not* tied to `sigma`.
+In the terminology of `docs/idea_core.md` §4.7 this is **regime (b)**: the only output-preserving
+symmetry is the per-unit rescaling `(w, b, sigma, h) -> alpha * (w, b, sigma, h)`, and pinning `h`
+removes it, so **there is no gauge freedom and `sigma` is a genuine degree of freedom** (unlike the
+`h = c_h * sigma` regime, where `sigma` is a redundant radial direction). Two consequences are used
+below: (i) whether a unit participates must be read off the gauge-invariant **crossing rate**
+`nu_k = E[z_k]` (or the effective gain `gamma_k = ||[w_k, b_k]|| / sigma_k`), never off the absolute
+value of `sigma_k` (idea_core.md §3.3, §4.3); (ii) the `sigma`-gradient estimator carries a
+structural bias specific to this regime (§8.5).
+
 ## 4. Proposed algorithm
 
 For each input `x` (batched over `N` points) and target `t`, run `M` stochastic
@@ -242,8 +253,9 @@ Nine learning methods are implemented:
    `cov_deriv` with each hidden update multiplied by the unit's noise-field strength
    `s_i`, `Delta W_l[i,j] *= s_i`. With `--field-sparsity 0` (default) the gate is
    all-ones and the rule is exactly `cov_deriv`; with `--field-sparsity f>0` a fraction
-   `f` of hidden units are **un-recruited** (`s_i = 0` — zero forward noise, hence dead,
-   **and** zero update), tying credit assignment to the NNN recruitment/noise-field idea.
+   `f` of hidden units are **un-recruited** (`s_i = 0` — zero *injected* noise, hence dead in
+   hidden layer 1 and near-silent in hidden layer 2 (§8.5), **and** zero update), tying credit
+   assignment to the NNN recruitment/noise-field idea.
 
 All nine start from identical initial weights. For the `cov_*` methods the network
 is updated with **no autograd / no `.backward()`** — manual tensor arithmetic under
@@ -284,8 +296,10 @@ that would otherwise cap the readout. Together they make the method fit convinci
 **A straightforward extension (`cov_deriv_field_gate`), now implemented (see §8.5).**
 Multiply each hidden update by a fixed or learnable per-unit noise-field gate `s_i`
 (e.g. a unit-wise `sigma` vector), `Delta W_l[i,j] *= s_i`. This connects credit
-assignment to the NNN recruitment/noise-field idea (units with zero field are detached
-and receive no update). It is a one-line change on top of `cov_deriv`.
+assignment to the NNN recruitment/noise-field idea (units with zero field receive no update, and
+are detached from the forward computation **in the first hidden layer**; deeper units need the
+mobilisation dial `rho_i` instead — see the corrections in §8.5). It is a one-line change on top of
+`cov_deriv`.
 
 ### 8.1 The perturbation gate (`cov_deriv_gate`)
 
@@ -611,18 +625,35 @@ with the autograd baseline (same `coeff`), so it is not a relative gap.
 
 **Tested — the bias is real but empirically small in these regimes.** Driving the readout layer's
 own noise weak (so upstream-driven cross-unit correlation dominates) does induce the predicted
-directional bias, and it is confirmed **sample-irreducible**: at `sigma_readout = 0.05` the
-single-variable readout mirror sits at Pearson `r ≈ 0.994` and **stays there** as `T` grows
-`128 -> 8192` (not a variance that averages out), while the **multivariate** mirror is exact
-(`r = 1.000`) throughout; the first-layer mirror stays clean (`r = 1.000`) as a control. But the
-magnitude is modest: even with **three hidden layers** and strongly decreasing per-layer noise
-(`stds = [0.5, 0.2, 0.05]`), the deepest single-variable mirror only falls to `r ≈ 0.991`
-(off-diagonal `|corr|` of the layer's units stays `≤ 0.012`) — the confound does **not** compound
-sharply with depth here, because each unit's intrinsic crossing noise keeps the units
-well-decorrelated. So the single-variable mirror is robust for these NNN regression nets; the
-multivariate mirror is the exact fallback if a strongly cross-correlated regime (dense/large
-weights, a shared noise field, or much deeper nets) ever makes the diagonal approximation bite.
+directional bias, and it is confirmed **sample-irreducible**: at `sigma_readout = 0.05`
+(with `h = 0.2` fixed that is `h/sigma = 4.0` against `0.4` at the default `sigma = 0.5`, i.e. a
+10x larger effective gain `gamma_k = ||[w_k, b_k]|| / sigma_k` — the regime is set by these
+**ratios**, not by the bare `sigma`, cf. idea_core.md §3.3/§4.3) the single-variable readout mirror
+sits at Pearson `r ≈ 0.994` and
+**stays there** as `T` grows `128 -> 8192` (not a variance that averages out), while the
+**multivariate** mirror is exact (`r = 1.000`) throughout; the first-layer mirror stays clean
+(`r = 1.000`) as a control. But the magnitude is modest: even with **three hidden layers** and
+strongly decreasing per-layer noise (`stds = [0.5, 0.2, 0.05]`, i.e. `h/sigma = 0.4 / 1.0 / 4.0`),
+the deepest single-variable mirror only falls to `r ≈ 0.991` (off-diagonal `|corr|` of the layer's
+units stays `≤ 0.012`) — the confound does **not** compound sharply with depth here, because each
+unit's intrinsic crossing noise keeps the units well-decorrelated. So the single-variable mirror is
+robust for these NNN regression nets; the multivariate mirror is the exact fallback if a strongly
+cross-correlated regime (dense/large weights, a shared noise field, or much deeper nets) ever makes
+the diagonal approximation bite.
 The single-variable-vs-multivariate mirror trade-off is discussed in full in the **Discussion (§9)**.
+
+> **※ Superseded on the depth question by `docs/idea_ca.md` §6.1 / §10.1.** The conclusion above
+> ("does not compound sharply with depth") was drawn from a *shallow, small, untrained-to-lightly-
+> trained regression* net. On MNIST (784-256×L-10, cross-entropy, 400 epochs of training, 3 seeds)
+> the degradation **is** monotone in depth: the worst-layer mirror `r` is **0.996 / 0.985 / 0.959**
+> at 2 / 3 / 4 hidden layers, and the intra-layer correlation was identified as a **rank-1 uniform
+> common mode** (`c_ki ≈ 0.0027`) produced by sample-to-sample fluctuation of the upstream layer's
+> **total firing count**; it grows with both depth and training (idea_ca.md §5.2, §6.1). The
+> practical consequence at depth 4 is instability rather than uniform loss (test acc
+> 0.856 ± 0.030). Neither of the two fixes named above is the one that worked: every cheap
+> algebraic correction failed (block-diagonal, uniform-mean removal, rank-1 projection, rank-1
+> Woodbury), and the fix that did work is the **period-tiled noise field** of idea_core.md §3.6 /
+> §5.7 (`r = 1.000` at every depth, zero extra arithmetic) — see §9.4 below and idea_ca.md §7–§8.
 
 ### 8.5 Noise-field / recruitment gate (`cov_deriv_field_gate`)
 
@@ -646,12 +677,38 @@ forward noise** — it is deterministic across the `t` samples, its crossing out
 this exact (a hard zero) rather than an `eps`-regularised near-zero, and generalises to any
 continuous field `s_i ∈ [0, 1]` (a soft recruitment weighting).
 
+> **※ Corrected — "`s_i = 0` ⇒ dead" is exact only in the FIRST hidden layer.** The model here is
+> `1-H-H-1`, i.e. it has a **second** hidden layer, and the claim above does not survive there.
+> `s_i = 0` removes a unit's *injected* noise, but from layer 2 on the pre-activation still
+> fluctuates across the `t` samples,
+> `d_{k,t} = d_bar_k + delta_up_k(t) + eta_k(t)`, and `delta_up` keeps straddling `+/-h`.
+> The distinction is between the ideal element and its sample-level realisation
+> (idea_core.md §2.1, §2.5, §3.4):
+> - **Ideal form** `z = 1[(d >= eta1) XOR (d >= eta2)]` draws *twice against the same `d`*.
+>   With `p = delta` the two comparisons are identically equal, so `z == 0` holds **exactly at any
+>   depth** — there, `sigma_k = 0` really does detach the unit.
+> - **The implementation** (cyclic XOR, §8.2) realises the pair as **two adjacent samples on the
+>   `T` axis**, so it compares two *different* pre-activations `d_t` and `d_{t+1}`. The two agree
+>   only where `d` is constant along `T`, which is exactly the **first hidden layer**
+>   (`SampleLayer` replicates `W x + b` `T` times). In layer `l >= 2` crossings continue even at
+>   `sigma_k = 0`; the measured residual is a plateau of `nu = 0.11–0.17` (idea_core.md §3.4).
+>
+> Exact silencing at any depth needs the **mobilisation dial** `rho_k`
+> (`sigma_k = rho_k * sigma_0`, `h_k = h_0 / rho_k`, so `h/sigma ~ rho^-2` diverges and a *finite*
+> `rho_k` gives `nu_k = 0`), or the three-step kill
+> `sigma_k <- 0`, `h_k <- H_DEAD = 1e6`, `W^{l+1}[:, k] <- 0` (idea_core.md §3.5). Participation is
+> measured by the gauge-invariant crossing rate `nu_k = E[z_k]`, never by the absolute value of
+> `sigma_k` (idea_core.md §3.3, §4.3). Nothing in the §8.5 *results* changes: the gate still zeroes
+> the update exactly, and the layer-1 units are genuinely dead; only the layer-2 units are
+> *near*-silent rather than silent.
+
 **Consistency check.** With `--field-sparsity 0` (default) the field is all-ones, the gate is a
 no-op, and the rule is **exactly `cov_deriv`** (the small MSE difference in the printout is only
 training stochasticity — the two nets draw independent forward noise). With `--field-sparsity f>0`
 a deterministic fraction `f` of hidden units per layer are set to `s_i = 0`; the shared network
-then genuinely has that many dead units, and only `cov_deriv_field_gate` explicitly refrains from
-updating them (the other methods leave them at their initial, non-learning state via the ≈0
+then genuinely has that many dead units (**※** exactly dead in hidden layer 1, only *near*-silent
+in hidden layer 2 — see the correction above), and only `cov_deriv_field_gate` explicitly refrains
+from updating them (the other methods leave them at their initial, non-learning state via the ≈0
 covariance credit).
 
 **Why it is included.** It is the cheapest possible bridge from the forward-noise credit rule to
@@ -660,9 +717,24 @@ credit assignment and neuron recruitment share the same per-unit field. It is a 
 hook — a learnable `s_i` (recruiting units where credit is high) is the natural next step and is
 left open.
 
+> **※ If `s_i` is made learnable, do not learn `sigma_i` alone.** Two reasons, both specific to the
+> **regime (b)** used here (`h` a global constant, §3):
+> 1. *Silencing.* Scaling `sigma_i` down does **not** silence a unit below layer 1 (correction
+>    above). The knob that does is the **mobilisation dial** `rho_i`, which moves `sigma_i` and
+>    `h_i` in **opposite** directions (`sigma_i = rho_i * sigma_0`, `h_i = h_0 / rho_i`) and is
+>    therefore transverse to the gauge orbit (idea_core.md §3.5, §4.6).
+> 2. *Gradient bias.* The natural field gradient reuses the third factor of the weight rule,
+>    `dL/dsigma_k = < g_hat_k * (-d_k / sigma_k) * phi'_T(d_k) >` (idea_core.md §5.8). That
+>    estimator is exact only when `h` is tied to `sigma` — yet it is measured to satisfy the Euler
+>    identity `dL/dlog sigma_k + (w_k . dL/dw_k + b_k . dL/db_k) = 0` **identically even with `h`
+>    fixed**, i.e. it enforces a symmetry the model does not have. That is a structural bias which
+>    **does not shrink with more samples** (idea_core.md §4.7, regime (b) pitfall). So the safe
+>    learnable knob is `rho_i`, not `sigma_i`.
+
 **Status.** Implemented as the `cov_deriv_field_gate` method and verified: un-recruited units are
 confirmed dead (zero activity variance) and receive exactly zero update; at `--field-sparsity 0`
-the rule reduces to `cov_deriv`.
+the rule reduces to `cov_deriv`. (**※** the "zero activity variance" check is exact for hidden
+layer 1; hidden-layer-2 units keep a residual crossing rate — see the correction above.)
 
 ### 8.6 Covariance readout error (`cov_jac_full`) — removing the last analytic gradient
 
@@ -811,10 +883,26 @@ Between the diagonal slope and a full inverse there is a spectrum worth explorin
   estimate incrementally; combined with the §8.4 trick of integrating the **known** applied
   increment `ΔW` (predict) and using RLS only to correct the static offset, this is the most
   principled hardware-aware route to a multivariate-quality mirror without a per-step inverse.
-- **Whiten by design:** if the injected noise field or the connectivity were shaped so that
-  `Cov(z, z)` is diagonal by construction (decorrelated per-unit fluctuations), the *diagonal*
-  mirror would be exact for free — a design lever that ties back to the NNN noise-field idea and
-  the recruitment gate (§8.5).
+- **Whiten by design:** if the injected noise field were shaped so that `Cov(z, z)` is diagonal by
+  construction (decorrelated per-unit fluctuations), the *diagonal* mirror would be exact for free.
+  **This has since been done, and the working lever is the noise field's *sample-axis correlation
+  structure*, not its amplitude or its sparsity** (`docs/idea_ca.md` §5.4–§8; idea_core.md §3.6,
+  §5.7). Tiling the **upstream** noise with period `P_eta` (`eta_t = eta_{t mod P_eta}`,
+  `P_eta >= 4`, `P_eta | T`) and centring the covariance **within each phase class**
+  `G_c = {t : t = c mod P_eta}` makes the shared upstream drive constant inside the estimation
+  window, so the intra-layer correlation is never generated: the mirror returns to `r = 1.000` at
+  four hidden layers, with **zero** extra arithmetic or memory (in hardware, clock-gating the
+  upstream LFSR). Two nearby-sounding levers were tested and **rejected**:
+  - *amplitude* (raising `sigma` to dilute the shared drive with private variance) is
+    catastrophic — forward CE `0.008 -> 0.336` at `2x sigma`, and the mirror does not even improve
+    (idea_ca.md §7.3): `phi_bar' ∝ (1 - 2F) p` shrinks at the same rate as the correlation, so the
+    signal is thinned along with the confound (the stochastic-resonance trade);
+  - *sparsifying the mobilisation* (the recruitment gate of §8.5) is expected to make it **worse**,
+    not better: fewer simultaneously active upstream units concentrate the shared drive into an
+    even lower-rank common mode (idea_ca.md §5.4, lever L4).
+
+  So the recruitment gate is **not** the route to a whitened `Cov(z, z)`; the period-tiled noise
+  field is.
 
 ### 9.5 Recommendation and open questions
 
@@ -830,7 +918,9 @@ Between the diagonal slope and a full inverse there is a spectrum worth explorin
 - **Depth.** The recursion multiplies per-layer mirror estimates, so even small per-layer
   directional biases can **compound**; the 2–3 hidden-layer tests show it staying small, but a
   whitening or multivariate correction may matter more for deep nets. Untested beyond three hidden
-  layers.
+  layers. (**※ Since tested** — `docs/idea_ca.md` §10.1: worst-layer mirror `r` = 0.996 / 0.985 /
+  0.959 at 2 / 3 / 4 hidden layers on MNIST, and the period-tiled noise field restores `r = 1.000`
+  at every depth. See the note at the end of §8.4.)
 - **Relation to known ideas.** The whole mirror mechanism is the **weight mirror** of Akrout et al.
   (2019) realised natively by the NNN's intrinsic noise; the `--jac-track` predict step is
   **Kolen–Pollack** (1994); the multivariate upgrade is ordinary multivariate regression / a
@@ -983,11 +1073,14 @@ python tmp/forward_noise_covariance_learning.py --jac-out probe --out-probe-alph
 
 The noise-field / recruitment gate (`cov_deriv_field_gate`, §8.5) uses `--field-sparsity`
 (default 0.0). At 0 it equals `cov_deriv`; a positive value makes that fraction of hidden units
-un-recruited (zero forward noise **and** zero update) on the shared network:
+un-recruited (zero injected noise **and** zero update) on the shared network:
 
 ```bash
-python tmp/forward_noise_covariance_learning.py --field-sparsity 0.3   # 30% of hidden units un-recruited (dead)
+python tmp/forward_noise_covariance_learning.py --field-sparsity 0.3   # 30% of hidden units un-recruited
 ```
+
+(Un-recruited units are exactly dead only in hidden layer 1; in hidden layer 2 upstream sample
+fluctuation keeps them crossing — see the correction in §8.5.)
 
 The distribution-free slope (§8.2) is the **default** for `cov_deriv` (`--slope kde`); it is
 most striking under `--noise uniform`, where it matches the analytic-`phi'` ablation
@@ -1009,7 +1102,8 @@ half-width), `crossing-h=0.2`, `seed=0`, `device=cpu`, `hidden-lr-scale=1.0`,
 `jac-out=cov_m3` (skew-corrected covariance readout error for `cov_jac_full`; `probe` / `cov`
 selectable, `out-probe-alpha=0.2` — see §8.6),
 `field-sparsity=0.0` (all units recruited; `>0` makes that fraction of hidden units
-un-recruited — see §8.5), `fit-check=off`, `include-gates=off`, `save=None`. (For the *scalar*
+un-recruited — see §8.5, incl. the correction on what "un-recruited" actually silences),
+`fit-check=off`, `include-gates=off`, `save=None`. (For the *scalar*
 `cov_deriv` credit, `--opt adam` / `--lr-decay cosine` do **not** lower its floor — see §10; but
 for `cov_jac`'s near-exact gradient, `--opt adam` **is** what reaches backprop level — §8.4.)
 A fast smoke test:

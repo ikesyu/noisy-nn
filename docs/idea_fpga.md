@@ -7,6 +7,16 @@ NCE 投稿論文（`docs/draft_nce.md`, cov_jac / cov_jac_full）の提案手法
 関連: `docs/draft_nce.md` §6（資源分析）、`docs/idea_duality.md`（続編構想。
 §6 の「1 つの場が推論・学習・電力を同時にゲートする」は方向 C として本計画と接続）。
 
+> ※ **上の引用（`idea_duality.md` §6）は同ファイル §12.6 で自己撤回済み**であり、無留保で引き継いではいけない。
+> 撤回の中身は電力ゲーティングの部分である: $\sigma$ を縮めても**縮んだ分は重み振幅に移る**だけで、
+> 量子化範囲・乗算器ビット幅という別のハードウェアコストに付け替わる。$\mathrm{mean}(\mathcal P)$ を
+> 最小化する目的関数はゲージ依存で、タスク損失を悪化させずに正則化項だけを下げるゲージ方向を持つ
+> （`idea_core.md` §4.3, §4.8）。**正しくは**: PE の電源を落としてよいのは
+> 交差率 $\nu_k=\mathbb E[z_k]=0$ のユニットのみであり、その状態は kill の三点操作
+> （$\sigma_k\leftarrow0$、$h_k\leftarrow H_{\mathrm{DEAD}}=10^6$、$W^{(l+1)}[:,k]\leftarrow\mathbf 0$）で作る
+> （`idea_core.md` §3.5）。「$\sigma$ が小さい」は電力を落とす根拠にならない。
+> 推論・学習の同時ゲーティング（(i)(ii)）は $\nu_k=0$ の下でそのまま成立するので、本計画との接続自体は残る。
+
 - 2026-07-15 計画立案、Phase 0 完了（両実験 PASS）
 - 2026-07-16 Phase 1 着手
 - 2026-07-23 Step 4 前半: OSS CAD Suite 導入、合成・P&R 初回試行（資源・Fmax 実測）
@@ -72,6 +82,18 @@ Adam はパラメータ毎に sqrt + 除算 + 状態 2 語 + 1/√v̂ の広い�
 
 **凍結仕様**: cov_jac + sgdm(1−2⁻⁴) + lr 2⁻³ + cosine ROM + jac_track（KP 追跡）
 + 一様ノイズ + per_input credit + KDE slope。
+
+> **体制の明示（`idea_core.md` §4.7）**: 本計画の実装（`tmp/fncl_phase1_fxp.py`）は、
+> ノイズが**全ユニット共通の Uniform(−1,1)**（`NoiseSource.draw` は per-unit の $\sigma_k$ を持たない）、
+> 交差しきい値 $h$ も**単一の大域定数**（`args.crossing_h` → 固定小数点では `hq`）、
+> KDE slope の分母も大域定数（`den_slope = 2·hq·T`）である。すなわち
+> **ノイズ場 $\mathcal P$ 自体が実装されていない体制 (b)（$h$ 大域固定 + $\theta$ 学習）の縮退版**であり、
+> 本計画がこれまで扱ってきたのは「ノイズ場つき NNN」ではなく「一様ノイズ単一水準の NNN」である。
+> 動員ダイヤル $\rho_k$ や kill の三点操作を将来この回路に載せるには、
+> (i) $h$ の **per-unit レジスタ化**（$h_k\leftarrow H_{\mathrm{DEAD}}$ を打てるように）、
+> (ii) slope 分母 $2h_kT$ の **per-unit 化**（$h$ が per-unit になると分母も per-unit になる）、
+> (iii) ノイズ振幅の per-unit スケール（$\sigma_k=\rho_k\sigma_0$）、が前提になる。
+> (i)(ii) はレーンローカルの小レジスタ + 既存の除算器で足りるが、語長契約（§5.4）の再検証が要る。
 
 ---
 
@@ -147,7 +169,8 @@ Phase 0 の B1 結果と一致することを確認する。T = 64 = 2⁶ なの
 
 ### Stage B — LFSR ノイズへの置換
 
-一様ノイズ Uniform(−1, 1) を LFSR 由来の k ビット一様整数に置き換える。
+一様ノイズ Uniform(−1, 1) を LFSR 由来の k ビット一様整数に置き換える
+（**全ユニット同一振幅**＝ノイズ場を持たない体制。§2 の注記）。
 検証する構成:
 
 - `phase`: 全ユニットが同一多項式の m 系列を異なる位相（シード）で共有
@@ -440,7 +463,9 @@ sgdm 更新 + KP 複製）を実行する学習コア。制御 FSM は §5.2 の
 - slope を `torch.round(cdiff × float)`（round-half-even, HW 非互換）から
   **`rdiv(cdiff << 2Fd, 2·hq·T)`（丸め付き整数除算）へ変更** — ランタイム
   データパスから浮動小数点を一掃。fxpsat 3 seeds 再実行で ×0.82・実測語長
-  とも変化なし。
+  とも変化なし。※ この分母 `2·hq·T` は**大域定数**（`hq` が単一の $h$）である。
+  per-unit の $h_k$ を導入するとここが per-unit 分母になり、除算器の発行スケジュールと
+  語長契約が変わる（§2 の体制注記の (ii)）。
 
 デバッグで得た RTL 側の教訓（Step 3 でも効く）:
 - FSM 内の条件付き comb 代入は「非活性状態で init 値に戻る」— `wrap_en` の
