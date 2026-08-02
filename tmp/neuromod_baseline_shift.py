@@ -85,10 +85,12 @@ def score(net, obs, targets, peak_std, args):
 
 
 def run_one(sigma_base: float, seed: int, obs, targets, args):
-    """Train a network at its own baseline, then dose it and re-score it.
+    """Train a network at its own baseline, then dose it at every gain and re-score.
 
-    Returns a record for one (baseline, seed) cell.  `d_err` is the drug's effect
-    on task error, so NEGATIVE means the drug helped.
+    Returns one record per dose.  Training happens once, because the drug is an
+    acute perturbation of a frozen network, so the dose axis is nearly free: sweep
+    it rather than re-running the whole experiment per dose.  `d_err` is the drug's
+    effect on task error, so NEGATIVE means the drug helped.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -103,29 +105,35 @@ def run_one(sigma_base: float, seed: int, obs, targets, args):
             args.epochs, args.lr, verbose=False)
 
     sep_b, sig_b, err_b = score(net, obs, targets, sigma_base, args)
-    sigma_drug = sigma_base * args.drug_gain
-    sep_d, sig_d, err_d = score(net, obs, targets, sigma_drug, args)
+    out = []
+    for gain in args.drug_gains:
+        sep_d, sig_d, err_d = score(net, obs, targets, sigma_base * gain, args)
+        out.append({
+            "seed": seed,
+            "gain": float(gain),
+            "sigma_base": float(sigma_base),
+            "sigma_drug": float(sigma_base * gain),
+            "h_over_sigma_base": args.crossing_h / float(sigma_base),
+            "err_base": err_b, "err_drug": err_d, "d_err": err_d - err_b,
+            "signal_base": sig_b, "signal_drug": sig_d, "d_signal": sig_d - sig_b,
+            "sep_base": sep_b, "sep_drug": sep_d,
+        })
+    return out
 
-    return {
-        "seed": seed,
-        "sigma_base": float(sigma_base),
-        "sigma_drug": float(sigma_drug),
-        "h_over_sigma_base": args.crossing_h / float(sigma_base),
-        "err_base": err_b, "err_drug": err_d, "d_err": err_d - err_b,
-        "signal_base": sig_b, "signal_drug": sig_d, "d_signal": sig_d - sig_b,
-        "sep_base": sep_b, "sep_drug": sep_d,
-    }
+
+AGG_KEYS = ("err_base", "err_drug", "d_err", "signal_base", "signal_drug",
+            "d_signal", "sep_base")
 
 
-def aggregate(records, baselines):
-    """Mean and std over seeds for each baseline, in `baselines` order."""
+def aggregate(records, baselines, gain):
+    """Mean and std over seeds for each baseline at one dose, in `baselines` order."""
     out = []
     for sigma in baselines:
-        cell = [r for r in records if np.isclose(r["sigma_base"], sigma)]
-        agg = {"sigma_base": float(sigma), "n": len(cell),
+        cell = [r for r in records
+                if np.isclose(r["sigma_base"], sigma) and np.isclose(r["gain"], gain)]
+        agg = {"sigma_base": float(sigma), "gain": float(gain), "n": len(cell),
                "h_over_sigma_base": cell[0]["h_over_sigma_base"]}
-        for key in ("err_base", "err_drug", "d_err", "signal_base", "signal_drug",
-                    "d_signal", "sep_base"):
+        for key in AGG_KEYS:
             values = np.array([c[key] for c in cell], dtype=float)
             agg[key] = float(values.mean())
             agg[key + "_std"] = float(values.std())
@@ -133,12 +141,27 @@ def aggregate(records, baselines):
     return out
 
 
+def crossover(agg):
+    """Baseline where the drug's effect changes sign, by linear interpolation.
+
+    Returns None when the effect keeps one sign across the whole range, which is
+    what the mean-field control is expected to do.
+    """
+    sigma = np.array([a["sigma_base"] for a in agg])
+    d_err = np.array([a["d_err"] for a in agg])
+    for i in range(len(d_err) - 1):
+        if d_err[i] < 0.0 <= d_err[i + 1]:
+            w = -d_err[i] / (d_err[i + 1] - d_err[i])
+            return float(sigma[i] + w * (sigma[i + 1] - sigma[i]))
+    return None
+
+
 def write_csv(path: Path, rows, args):
     path.parent.mkdir(parents=True, exist_ok=True)
     keys = list(rows[0].keys())
     with path.open("w") as f:
         f.write(f"# neuromod_baseline_shift  model={args.model} "
-                f"drug_gain={args.drug_gain} h={args.crossing_h} "
+                f"drug_gains={args.drug_gains} h={args.crossing_h} "
                 f"epochs={args.epochs} grid_side={args.grid_side} "
                 f"hidden={args.hidden_dim} seeds={args.seeds}\n")
         f.write("# d_err < 0 means the drug IMPROVED the task\n")
@@ -148,17 +171,21 @@ def write_csv(path: Path, rows, args):
     print(f"saved {path}")
 
 
-def plot(agg, args, save_path=None):
-    """Two panels: where each baseline sits on the U, and the effect's sign flip."""
+def plot(per_gain, args, save_path=None):
+    """Two panels: where each baseline sits on the U, and the effect's sign flip.
+
+    `per_gain` maps dose -> aggregated rows.  With several doses the lower panel
+    becomes one line per dose, which shows how the crossover moves with the dose.
+    """
     viz.use_headless(save_path)
     import matplotlib.pyplot as plt
     plt.rcParams.update(viz.FONT)
 
-    sigma = np.array([a["sigma_base"] for a in agg])
-    err_b = np.array([a["err_base"] for a in agg])
-    err_d = np.array([a["err_drug"] for a in agg])
-    d_err = np.array([a["d_err"] for a in agg])
-    d_std = np.array([a["d_err_std"] for a in agg])
+    gains = sorted(per_gain)
+    ref = per_gain[gains[0]]
+    sigma = np.array([a["sigma_base"] for a in ref])
+    err_b = np.array([a["err_base"] for a in ref])
+    err_b_std = np.array([a["err_base_std"] for a in ref])
 
     fig, (ax_u, ax_d) = plt.subplots(2, 1, figsize=(8.5, 8.4), sharex=True)
 
@@ -167,25 +194,44 @@ def plot(agg, args, save_path=None):
     # OFF it, because the drugged point is the same frozen net evaluated elsewhere.
     ax_u.plot(sigma, err_b, "-o", color="0.25", lw=1.6,
               label="trained at its own baseline")
+    if args.seeds > 1:
+        ax_u.fill_between(sigma, err_b - err_b_std, err_b + err_b_std,
+                          color="0.25", alpha=0.18)
+    show = per_gain[gains[-1]]
+    err_d = np.array([a["err_drug"] for a in show])
+    d_err = np.array([a["d_err"] for a in show])
     for x, y0, y1 in zip(sigma, err_b, err_d):
-        helped = y1 < y0
         ax_u.annotate("", xy=(x, y1), xytext=(x, y0),
                       arrowprops=dict(arrowstyle="->", lw=2.0,
-                                      color="tab:blue" if helped else "tab:red"))
+                                      color="tab:blue" if y1 < y0 else "tab:red"))
     ax_u.scatter(sigma, err_d, s=28, zorder=5,
                  color=["tab:blue" if d < 0 else "tab:red" for d in d_err],
-                 label=f"after drug (sigma x {args.drug_gain})")
+                 label=f"after drug (sigma x {gains[-1]:g})")
     ax_u.set_ylabel("task error")
     ax_u.legend(loc="upper center")
     ax_u.grid(alpha=0.3)
 
     # Panel B: the effect itself.  A zero crossing is the whole claim.
-    colors = ["tab:blue" if d < 0 else "tab:red" for d in d_err]
-    ax_d.bar(sigma, -d_err, width=0.6 * float(np.min(np.diff(sigma)) if len(sigma) > 1
-                                              else 0.2),
-             color=colors, alpha=0.85)
-    if args.seeds > 1:
-        ax_d.errorbar(sigma, -d_err, yerr=d_std, fmt="none", ecolor="0.3", capsize=3)
+    if len(gains) == 1:
+        d_err = np.array([a["d_err"] for a in ref])
+        d_std = np.array([a["d_err_std"] for a in ref])
+        width = 0.6 * float(np.min(np.diff(sigma))) if len(sigma) > 1 else 0.2
+        ax_d.bar(sigma, -d_err, width=width, alpha=0.85,
+                 color=["tab:blue" if d < 0 else "tab:red" for d in d_err])
+        if args.seeds > 1:
+            ax_d.errorbar(sigma, -d_err, yerr=d_std, fmt="none", ecolor="0.3",
+                          capsize=3)
+    else:
+        for gain in gains:
+            rows = per_gain[gain]
+            improve = -np.array([a["d_err"] for a in rows])
+            std = np.array([a["d_err_std"] for a in rows])
+            line, = ax_d.plot(sigma, improve, "-o", lw=1.6,
+                              label=f"sigma x {gain:g}")
+            if args.seeds > 1:
+                ax_d.fill_between(sigma, improve - std, improve + std,
+                                  color=line.get_color(), alpha=0.18)
+        ax_d.legend(title="dose", ncol=2)
     ax_d.axhline(0.0, color="0.2", lw=1.2)
     ax_d.set_xlabel(r"baseline noise level  $\sigma_{\rm base}$"
                     f"   (h={args.crossing_h} fixed)")
@@ -196,24 +242,32 @@ def plot(agg, args, save_path=None):
     return viz.save_or_show(fig, save_path)
 
 
-def summarise(agg, args) -> None:
-    helped = [a["sigma_base"] for a in agg if a["d_err"] < 0]
-    hurt = [a["sigma_base"] for a in agg if a["d_err"] > 0]
-    print(f"\nDrug = sigma x {args.drug_gain}, h={args.crossing_h} fixed, "
-          f"model={args.model}")
-    print(f"  helped at baselines: "
-          + (", ".join(f"{s:.2f}" for s in helped) if helped else "(none)"))
-    print(f"  hurt   at baselines: "
-          + (", ".join(f"{s:.2f}" for s in hurt) if hurt else "(none)"))
-    if helped and hurt:
-        print(f"  SIGN FLIP present: the same dose helps below "
-              f"~{max(helped):.2f} and hurts above ~{min(hurt):.2f}.")
-        print("  A look-up key cannot do this; it requires an interior optimum.")
+def summarise(per_gain, args) -> None:
+    print(f"\nh={args.crossing_h} fixed, model={args.model}, seeds={args.seeds}")
+    any_flip = False
+    for gain in sorted(per_gain):
+        agg = per_gain[gain]
+        helped = [a["sigma_base"] for a in agg if a["d_err"] < 0]
+        hurt = [a["sigma_base"] for a in agg if a["d_err"] > 0]
+        cross = crossover(agg)
+        print(f"  dose sigma x {gain:g}:")
+        print("    helped at: "
+              + (", ".join(f"{s:.2f}" for s in helped) if helped else "(none)"))
+        print("    hurt   at: "
+              + (", ".join(f"{s:.2f}" for s in hurt) if hurt else "(none)"))
+        if cross is not None:
+            any_flip = True
+            print(f"    SIGN FLIP at sigma_base ~ {cross:.3f} "
+                  f"(h/sigma = {args.crossing_h / cross:.3f})")
+        else:
+            direction = "helped" if helped else "hurt"
+            print(f"    no sign flip: {direction} at every baseline")
+    if any_flip:
+        print("  A look-up key cannot produce a sign flip; it requires an interior "
+              "optimum.")
     else:
-        direction = "helped" if helped else "hurt"
-        print(f"  No sign flip: the dose {direction} at every baseline. "
-              f"Expected for --model analytic (mean field has no interior optimum); "
-              f"for --model sample, widen --s-min/--s-max or check the optimum.")
+        print("  No flip at any dose. Expected for --model analytic (the mean field "
+              "has no interior optimum); for --model sample, widen --s-min/--s-max.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -223,8 +277,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", choices=("analytic", "sample"), default="sample",
                    help="sample = mechanism (interior optimum, so a flip can exist); "
                         "analytic = mean field, the predicted null [sample]")
-    p.add_argument("--drug-gain", type=float, default=1.4,
-                   help="Acute dose as a multiplier on sigma, h held fixed [1.4]")
+    p.add_argument("--drug-gains", default="1.4",
+                   help="Comma-separated acute doses as multipliers on sigma, h held "
+                        "fixed. Doses are probed on the SAME trained network, so "
+                        "extra doses are nearly free [1.4]")
     p.add_argument("--s-min", type=float, default=0.3, help="Lowest baseline [0.3]")
     p.add_argument("--s-max", type=float, default=2.2, help="Highest baseline [2.2]")
     p.add_argument("--baselines", type=int, default=7,
@@ -259,31 +315,35 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.drug_gains = [float(g) for g in str(args.drug_gains).split(",") if g.strip()]
     baselines = np.linspace(args.s_min, args.s_max, args.baselines)
     obs, targets = build_data(args.grid_side, args.target_gamma, args.alpha_mix)
 
+    n_nets = args.baselines * args.seeds
     print(f"model={args.model}  baselines={args.baselines} in "
-          f"[{args.s_min}, {args.s_max}]  seeds={args.seeds}  "
-          f"epochs={args.epochs}  ({args.baselines * args.seeds} networks to train)")
+          f"[{args.s_min}, {args.s_max}]  seeds={args.seeds}  epochs={args.epochs}  "
+          f"doses={args.drug_gains}  ({n_nets} networks to train, "
+          f"~{n_nets * args.epochs / 60:.0f} min for the sample model)")
 
     records = []
     for sigma_base in baselines:
         for k in range(args.seeds):
-            rec = run_one(sigma_base, args.seed0 + k, obs, targets, args)
-            records.append(rec)
+            cells = run_one(sigma_base, args.seed0 + k, obs, targets, args)
+            records.extend(cells)
+            effects = "  ".join(
+                f"x{c['gain']:g}:{c['d_err']:+.4f}" for c in cells)
             print(f"  sigma_base={sigma_base:5.2f} seed={args.seed0 + k}  "
-                  f"err {rec['err_base']:.4f} -> {rec['err_drug']:.4f}  "
-                  f"(d={rec['d_err']:+.4f}, "
-                  f"{'helped' if rec['d_err'] < 0 else 'hurt'})", flush=True)
+                  f"err={cells[0]['err_base']:.4f}   d_err  {effects}", flush=True)
 
-    agg = aggregate(records, baselines)
-    summarise(agg, args)
+    per_gain = {g: aggregate(records, baselines, g) for g in args.drug_gains}
+    summarise(per_gain, args)
 
     if args.save:
         write_csv(viz.resolve_out(f"{args.tag}.csv", args.out_dir), records, args)
-        plot(agg, args, save_path=viz.resolve_out(f"{args.tag}_curve.png", args.out_dir))
+        plot(per_gain, args,
+             save_path=viz.resolve_out(f"{args.tag}_curve.png", args.out_dir))
     else:
-        plot(agg, args)
+        plot(per_gain, args)
 
 
 if __name__ == "__main__":

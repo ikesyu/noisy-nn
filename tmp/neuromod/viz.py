@@ -211,52 +211,27 @@ def animate(predict, objects, fields, history, alphas, *,
     vmax = float(max(f.max() for f in fields.values()))
     speed_hist: list[float] = []
 
+    params = world.LoopParams(
+        eat_radius=eat_radius, shelter_radius=shelter_radius,
+        food_respawn=food_respawn, speed_mode=speed_mode, speed_gain=speed_gain,
+        velocity_smoothing=velocity_smoothing, dt=dt, hunger_rate=hunger_rate,
+        need_rate=need_rate, eat_amount=eat_amount, rest_frames=rest_frames,
+        threat_gain=threat_gain, threat_range=threat_range,
+        neuromod_smoothing=neuromod_smoothing, threat_motion=threat_motion,
+        threat_speed=threat_speed, threat_seed=seed)
+
     def update(frame):
         objs = state["objects"]
         if demo_mode == "cycle" and dynamic and "vels" in state:
             world.update_dynamic_objects(objs, state["vels"])
 
-        if demo_mode == "scripted":
-            if threats_move:
-                world.step_threats(objs, state["threat_vels"],
-                                   shelter_keepout=world.THREAT_KEEPOUT_RADIUS,
-                                   bounds=world.THREAT_BOUNDS)
-            world.advance_drives(state, shelter_radius, hunger_rate, need_rate,
-                                 rest_frames)
-            state["w"], state["goal"], _ = world.neuromod_weights(
-                state["pos"], objs, state["hunger"], state["shelter_need"],
-                state["goal"], state["w"], threat_gain, threat_range,
-                neuromod_smoothing)
-            weights = state["w"]
-        else:
-            phase = 2.0 * np.pi * frame / anim_frames
-            weights = world.cyclic_weights(phase)
-
-        from . import fields as fields_mod
-        field = fields_mod.blend_fields(fields, weights, world.CATEGORIES)
+        rec = world.advance_frame(state, predict, fields, params,
+                                  demo_mode=demo_mode, frame=frame,
+                                  n_frames=anim_frames)
+        weights, field, speed = rec["weights"], rec["field"], rec["speed"]
+        field_name, episode_label = rec["field_name"], rec["label"]
         current_alpha = world.blend_alpha(weights, alphas)
-        dom = int(np.argmax(weights))
-        state_name = world.STATES[dom]
-        field_name = world.STATE_TO_FIELD[state_name]
-        episode_label = world.EPISODE_LABEL[state_name]
-
-        obs = world.encode_observation(state["pos"], objs,
-                                       food_strengths=state["food_strengths"])
-        v_pred = predict(obs[None, :], field).ravel()
-
-        resting = (demo_mode == "scripted" and state["rest"] > 0)
-        speed = world.step_agent(state, v_pred, dt, speed_gain, mode=speed_mode,
-                                 smoothing=velocity_smoothing, resting=resting)
         speed_hist.append(speed)
-
-        ate = world.apply_food_depletion(
-            state["pos"], objs, state["food_strengths"], eat_radius,
-            respawn=(food_respawn or demo_mode == "scripted"))
-        if ate:
-            state["hunger"] = max(0.0, state["hunger"] - eat_amount)
-
-        state["trail"].append(state["pos"].copy())
-        state["trail"] = state["trail"][-160:]
         trail = np.array(state["trail"])
         n_left = int(np.sum(state["food_strengths"] > 0.0))
         n_food = state["food_strengths"].shape[0]
@@ -319,6 +294,111 @@ def animate(predict, objects, fields, history, alphas, *,
     anim.save(path, writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"saved {path}  ({anim_frames} frames)")
+    return path
+
+
+def concentration_slider(predict, objects, fields, params, schedule, curve,
+                         *, metric_label="foods eaten per 1000 frames",
+                         hidden_dim=64, save_path=None, fps=20, trail_speed=300,
+                         stride=1, figsize=(11, 8.8)):
+    """Watch one animal behave while the neuromodulator concentration is swept.
+
+    `schedule` is the per-frame concentration; `curve` is (x, y, y_std) of the
+    behavioural measure over concentration, precomputed from headless rollouts of
+    the SAME dynamics.  The cursor on that curve is what makes the point: you see
+    where the animal currently sits on the inverted U while watching what it can
+    and cannot do there.
+
+    Panels: world and trajectory, the noise field at the current concentration, the
+    speed trace (silence at low concentration shows up here first), and the
+    behavioural curve with a cursor.
+    """
+    use_headless(save_path)
+    plt.rcParams.update(FONT)
+    side = int(round(np.sqrt(hidden_dim)))
+
+    state = world.initialize_demo_state(objects, "scripted")
+    if params.threat_motion == "moving":
+        state["threat_vels"] = world.make_threat_velocities(
+            state["objects"], params.threat_speed, params.threat_seed)
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    ax_env, ax_curve = axes[0]
+    ax_field, ax_speed = axes[1]
+
+    x_curve, y_curve, y_std = curve
+    ax_curve.plot(x_curve, y_curve, "-o", color="0.25", lw=1.8)
+    if y_std is not None:
+        ax_curve.fill_between(x_curve, y_curve - y_std, y_curve + y_std,
+                              color="0.25", alpha=0.18)
+    ax_curve.set_xscale("log")
+    ax_curve.set_xlabel("neuromodulator concentration  (field scale)")
+    ax_curve.set_ylabel(metric_label)
+    ax_curve.set_title("acute dose response of this one animal")
+    ax_curve.grid(alpha=0.3)
+    cursor = ax_curve.axvline(schedule[0], color="#c23b3b", lw=2.0)
+    marker, = ax_curve.plot([], [], "o", color="#c23b3b", ms=11, zorder=6)
+
+    # Scale the field panel to a bit above the useful band rather than to the top of
+    # the schedule: the extreme concentrations are the point of the sweep, but if the
+    # colour scale is set by them the interesting middle renders almost black.
+    peak = float(max(f.max() for f in fields.values()))
+    vmax = peak * float(min(max(schedule), 2.5 * np.median(schedule)))
+    speed_hist, eaten = [], [0]
+
+    # `stride` advances the dynamics several times per drawn frame.  The episode is
+    # unchanged; only the number of rendered frames drops, which is what the file
+    # size is made of.
+    def update(drawn):
+        for k in range(stride):
+            frame = min(drawn * stride + k, len(schedule) - 1)
+            conc = float(schedule[frame])
+            rec = world.advance_frame(state, predict, fields, params,
+                                      concentration=conc, demo_mode="scripted",
+                                      frame=frame, n_frames=len(schedule))
+            eaten[0] += int(rec["ate"])
+            speed_hist.append(rec["speed"])
+        trail = np.array(state["trail"])
+
+        ax_env.clear()
+        draw_objects(ax_env, state["objects"], state["food_strengths"])
+        if len(trail) > 1:
+            ax_env.plot(trail[:, 0], trail[:, 1], "-", color="0.4", lw=1.5, alpha=0.85)
+        ax_env.scatter(state["pos"][0], state["pos"][1], s=150, color="black", zorder=6)
+        _square_axes(ax_env, f"{rec['label']}   eaten {eaten[0]}")
+
+        ax_field.clear()
+        ax_field.imshow(rec["field"].numpy().reshape(side, side), origin="lower",
+                        extent=[0, 1, 0, 1], cmap="magma", vmin=0.0, vmax=vmax)
+        ax_field.set_title(f"noise field at concentration {conc:.2f}")
+        ax_field.set_xticks([])
+        ax_field.set_yticks([])
+
+        ax_speed.clear()
+        ax_speed.plot(speed_hist[-trail_speed:], color="0.2", lw=1.4)
+        ax_speed.set_xlabel("frame")
+        ax_speed.set_ylabel("|v| (network output)")
+        ax_speed.set_ylim(0, 1.15)
+        ax_speed.set_yticks([0, 0.5, 1.0])
+        ax_speed.grid(alpha=0.3)
+        ax_speed.set_title(f"speed {rec['speed']:.2f}")
+
+        cursor.set_xdata([conc, conc])
+        marker.set_data([conc], [float(np.interp(conc, x_curve, y_curve))])
+        return []
+
+    fig.tight_layout()
+    n_drawn = int(np.ceil(len(schedule) / stride))
+    anim = FuncAnimation(fig, update, frames=n_drawn,
+                         interval=1000 / fps, blit=False, repeat=True)
+    if save_path is None:
+        plt.show()
+        return anim
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    anim.save(path, writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    print(f"saved {path}  ({n_drawn} drawn frames, {len(schedule)} dynamics steps)")
     return path
 
 

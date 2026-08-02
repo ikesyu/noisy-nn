@@ -35,6 +35,8 @@ avoid geometry comes from the network.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 
@@ -362,22 +364,28 @@ def cyclic_weights(phase: float, beta: float = 3.0) -> np.ndarray:
 
 def step_agent(state: dict, v_pred: np.ndarray, dt: float, speed_gain: float,
                mode: str = "learned", smoothing: float = 0.2,
-               resting: bool = False) -> float:
+               resting: bool = False, speed_ref: float = None) -> float:
     """Advance the agent one frame along the network's predicted velocity.
 
     `mode` decides whether the network's output MAGNITUDE is used:
 
-        "learned"  step = dt * speed_gain * v.  The learned tanh speed law
-                   survives, so the agent decelerates on approach AND freezes
-                   when the network falls silent.  Required for behaviour-level
-                   stochastic resonance: normalising the magnitude away hides the
-                   low-noise collapse, which is the left arm of the inverted U
-                   (docs/idea_neuromod.md section 7.1).
-        "cruise"   direction only at constant speed.  The original demo look;
-                   keep for figures where a constant-speed trace is easier to read.
+        "learned"  the magnitude survives, so the agent decelerates on approach AND
+                   freezes when the network falls silent.  Required for behaviour-
+                   level stochastic resonance: normalising the magnitude away hides
+                   the low-noise collapse, which is the left arm of the inverted U.
+        "cruise"   direction only at constant speed.  Easier to read in a figure, but
+                   it cannot show the collapse.
 
-    Returns the smoothed speed |v|, which is worth plotting: it is the channel
-    that carries the collapse.
+    `speed_ref` fixes a scaling trap in "learned" mode.  `speed_gain` was chosen for
+    cruise, where |v| is 1 by construction; a trained network's typical |v| is well
+    below 1, so raw `dt * speed_gain * v` makes the animal roughly three times slower
+    than the cruise demo and it covers too little ground to forage.  Passing this
+    animal's NORMAL output magnitude rescales the speed to
+    `speed_gain * min(1, |v| / speed_ref)`, which keeps the collapse (|v| -> 0 still
+    means frozen) while matching the cruise pace at the concentration it lives at.
+
+    Returns the smoothed |v| itself, unscaled: that is the channel to plot, because
+    it is what actually collapses.
     """
     if resting:
         state["vel"] = np.zeros(2, dtype=np.float32)
@@ -390,13 +398,153 @@ def step_agent(state: dict, v_pred: np.ndarray, dt: float, speed_gain: float,
     speed = float(np.linalg.norm(v))
     state["speed"] = speed
 
-    if mode == "learned":
-        step = dt * speed_gain * v
+    if speed <= 1e-3:
+        step = np.zeros(2, dtype=np.float32)
+    elif mode == "cruise":
+        step = dt * speed_gain * v / speed
+    elif speed_ref:
+        scale = min(1.0, speed / float(speed_ref))
+        step = dt * speed_gain * scale * v / speed
     else:
-        step = dt * speed_gain * v / speed if speed > 1e-3 else np.zeros(2, np.float32)
+        step = dt * speed_gain * v
 
     state["pos"] = np.clip(state["pos"] + step, -1.0, 1.0).astype(np.float32)
     return speed
+
+
+@dataclasses.dataclass
+class LoopParams:
+    """Every knob of the closed loop, in one place.
+
+    The animation and the headless rollout must run the SAME dynamics, otherwise the
+    behavioural SR curve would not describe the animal you are watching.  Both go
+    through `advance_frame` with one of these.
+    """
+    eat_radius: float = 0.10
+    shelter_radius: float = 0.08
+    food_respawn: bool = True
+    speed_mode: str = "learned"
+    speed_gain: float = 0.9
+    speed_ref: float = None      # this animal's normal |v|; see step_agent
+    velocity_smoothing: float = 0.2
+    dt: float = 0.04
+    hunger_rate: float = 0.006
+    need_rate: float = 0.006
+    eat_amount: float = 0.6
+    rest_frames: int = 50
+    threat_gain: float = 1.7
+    threat_range: float = 0.40
+    neuromod_smoothing: float = 0.12
+    threat_motion: str = "moving"
+    threat_speed: float = 0.01
+    threat_seed: int = 0
+
+
+def advance_frame(state: dict, predict, fields, params: LoopParams,
+                  concentration: float = 1.0, demo_mode: str = "scripted",
+                  frame: int = 0, n_frames: int = 360) -> dict:
+    """One closed-loop frame: drives -> field -> network -> movement -> bookkeeping.
+
+    `predict(obs[1, 6], field) -> [1, 2]` hides the model.  `concentration` scales
+    the whole blended field, which is the neuromodulator-concentration axis: at low
+    concentration the crossing falls below threshold and the network goes silent, at
+    high concentration it saturates.  With `speed_mode="learned"` that shows up in
+    the agent as freezing and as aimless drift respectively.
+
+    Returns a per-frame record; the caller decides whether to draw it or count it.
+    """
+    from . import fields as fields_mod
+
+    objs = state["objects"]
+    if demo_mode == "scripted":
+        if params.threat_motion == "moving" and "threat_vels" in state:
+            step_threats(objs, state["threat_vels"],
+                         shelter_keepout=THREAT_KEEPOUT_RADIUS, bounds=THREAT_BOUNDS)
+        advance_drives(state, params.shelter_radius, params.hunger_rate,
+                       params.need_rate, params.rest_frames)
+        state["w"], state["goal"], _ = neuromod_weights(
+            state["pos"], objs, state["hunger"], state["shelter_need"],
+            state["goal"], state["w"], params.threat_gain, params.threat_range,
+            params.neuromod_smoothing)
+        weights = state["w"]
+    else:
+        weights = cyclic_weights(2.0 * np.pi * frame / max(1, n_frames))
+
+    field = fields_mod.blend_fields(fields, weights, CATEGORIES) * float(concentration)
+
+    obs = encode_observation(state["pos"], objs, food_strengths=state["food_strengths"])
+    v_pred = np.asarray(predict(obs[None, :], field)).ravel()
+
+    resting = (demo_mode == "scripted" and state["rest"] > 0)
+    speed = step_agent(state, v_pred, params.dt, params.speed_gain,
+                       mode=params.speed_mode, smoothing=params.velocity_smoothing,
+                       resting=resting, speed_ref=params.speed_ref)
+
+    ate = apply_food_depletion(state["pos"], objs, state["food_strengths"],
+                               params.eat_radius,
+                               respawn=(params.food_respawn or demo_mode == "scripted"))
+    if ate:
+        state["hunger"] = max(0.0, state["hunger"] - params.eat_amount)
+
+    state["trail"].append(state["pos"].copy())
+    state["trail"] = state["trail"][-160:]
+
+    threat = objs["threat"]
+    d_threat = (float(np.linalg.norm(threat - state["pos"][None, :], axis=1).min())
+                if threat.shape[0] else float("inf"))
+    dom = int(np.argmax(weights))
+
+    return {
+        "weights": weights, "field": field, "speed": speed, "ate": ate,
+        "resting": resting, "d_threat": d_threat,
+        "inside_shelter": apply_shelter_satisfaction(state["pos"], objs,
+                                                     params.shelter_radius),
+        "state_name": STATES[dom], "field_name": STATE_TO_FIELD[STATES[dom]],
+        "label": EPISODE_LABEL[STATES[dom]],
+    }
+
+
+def rollout(predict, fields, params: LoopParams, n_frames: int = 1200,
+            concentration: float = 1.0, demo_mode: str = "scripted",
+            layout: str = "scripted", objects: dict = None, seed: int = 0) -> dict:
+    """Run one closed-loop episode headlessly and return behavioural measures.
+
+    These are the quantities a behaviour-level stochastic-resonance claim is about:
+    what the animal MANAGES TO DO, not how well a vector field is regressed.
+    """
+    objs = objects if objects is not None else make_scripted_objects()
+    state = initialize_demo_state(objs, layout)
+    if params.threat_motion == "moving":
+        state["threat_vels"] = make_threat_velocities(state["objects"],
+                                                      params.threat_speed, seed)
+    foods = 0
+    speeds, sheltered, close_calls = [], 0, 0
+    d_threat_min = float("inf")
+    start = state["pos"].copy()
+    path = 0.0
+
+    for k in range(n_frames):
+        prev = state["pos"].copy()
+        rec = advance_frame(state, predict, fields, params,
+                            concentration=concentration, demo_mode=demo_mode,
+                            frame=k, n_frames=n_frames)
+        foods += int(rec["ate"])
+        speeds.append(rec["speed"])
+        sheltered += int(rec["inside_shelter"])
+        d_threat_min = min(d_threat_min, rec["d_threat"])
+        close_calls += int(rec["d_threat"] < 0.2)
+        path += float(np.linalg.norm(state["pos"] - prev))
+
+    return {
+        "foods": foods,
+        "foods_per_1k": 1000.0 * foods / n_frames,
+        "mean_speed": float(np.mean(speeds)),
+        "shelter_frac": sheltered / n_frames,
+        "close_frac": close_calls / n_frames,
+        "d_threat_min": d_threat_min,
+        "path_len": path,
+        "net_displacement": float(np.linalg.norm(state["pos"] - start)),
+    }
 
 
 def advance_drives(state: dict, shelter_radius: float, hunger_rate: float,
