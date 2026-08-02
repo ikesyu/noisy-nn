@@ -1,5 +1,5 @@
 """rl_multimode -- noise-field Sub-B: two behaviors multiplexed on ONE weight set,
-addressed by the noise field (§7.2 / §14.2; RL version of front_comp's L1 result).
+addressed by the noise field (§7.2 / §14.2; RL version of idea_neuromod.md's L1 result).
 
 Trains the shared-weight policy on the hidden-regime two-target reach, then shows the
 decisive test: FIX the noise field and the agent commits to that field's target; SWITCH

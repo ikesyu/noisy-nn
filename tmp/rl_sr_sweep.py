@@ -15,7 +15,7 @@ stochastic-resonance curve for RL.
 
 Note: the covariance credit ONLY exists in the sample (mechanism) regime; the analytic
 mean-field crossing has no T samples and cannot form the mirror at all -- so this sweep is
-intrinsically about the sample mechanism (the point front_comp makes for SR).
+intrinsically about the sample mechanism (the point idea_neuromod.md makes for SR).
 
     static (fast, no learning):
         .venv/bin/python tmp/rl_sr_sweep.py --mode static

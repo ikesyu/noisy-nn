@@ -34,7 +34,7 @@ def main():
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
 
-    policy, critic, norm, cks, hist = train_ppo_nnn(
+    policy, critic, norm, cks, hist, _stats = train_ppo_nnn(
         seed=args.seed, updates=args.updates, horizon=args.horizon,
         ppo_epochs=args.ppo_epochs, clip_eps=args.clip_eps,
         sigma_explore_end=args.sigma_end, verbose=True)

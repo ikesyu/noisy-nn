@@ -1,4 +1,4 @@
-"""rl_multimode_lesion -- noise-field L2: multiplexing vs partition (front_comp L2 in RL).
+"""rl_multimode_lesion -- noise-field L2: multiplexing vs partition (idea_neuromod.md L2 in RL).
 
 Sub-B/§21.2 used DISJOINT recruitment fields, so the two behaviors sat in separate unit
 groups (a partition).  Here the two fields OVERLAP (share a middle block of units).  We
@@ -10,7 +10,7 @@ which behaviors degrade:
     lesion P1-only units  -> only the P1 behavior degrades
 
 If shared-unit damage hits both behaviors, they are MULTIPLEXED on the shared subnet, not
-partitioned into disjoint regions (the direct refutation front_comp wants).
+partitioned into disjoint regions (the direct refutation idea_neuromod.md wants).
 
     .venv/bin/python tmp/rl_multimode_lesion.py --episodes 3000 --recruit_frac 0.7
 """
