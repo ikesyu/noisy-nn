@@ -80,7 +80,7 @@
 #### $\rho$ — 動員ダイヤル**のみ**に使う
 
 - **正典**: $\rho_k \in [0,1]$、$\sigma_k=\rho_k\sigma_0,\ h_k=h_0/\rho_k$（`idea_consolidation.md` §4.6、
-  `idea_rl.md` §23.7、`idea_reservoir.md` §5.6、`draft_tcds.md`）。**制御変数**であり観測量ではない。
+  `idea_rl.md` §23.7、`idea_reservoir.md` §5.6）。**制御変数**であり観測量ではない。
 - 改名するもの:
   - `idea_ca.md` §5.1 の層内相関比 $\rho_{ki}=\sum_n\mathrm{Cov}_T(z_k,z_i)/\sum_n\mathrm{Var}_T(z_i)$
     → 本稿では $\boldsymbol{c_{ki}}$（correlation ratio）と書く。
@@ -338,7 +338,7 @@ autograd なしで同一パス版に置き換えられる。
 | **Analytical-level** $\bar\phi$ | 期待値（決定論） | 高速な平均場近似。`CrossingAnalytic` |
 
 **理論的に重要な非等価性**: analytic 水準は sample 水準の忠実な縮約では**ない**。
-ノイズ強度に対する最適性が消える。`recipe_sr.md` §3 と `draft_front_comp_neuro.md` §4 の実測:
+ノイズ強度に対する最適性が消える。`idea_neuromod.md` §6 の実測:
 
 - `sample`（実ノイズ注入 + $h>0$）: 学習水準スイープで**内点最適** $\sigma^*\approx0.8$–$1.2$、
   低 $\sigma$ 側で崩壊。しきい値下の信号はノイズの助けなしには伝達されないという**真の障壁**がある。
@@ -1458,7 +1458,7 @@ NG-RC 0.078@562 params 対 本系 0.360@3265）、存在理由は固有性質と
 これを示せない限り本系は「ノイズ場という基質で RC を再現しただけ」に吸収される。
 要石は **option 2（真の確率的 cov_jac + 特徴学習が原理的に必要な課題）で、現時点で未着手**である。
 
-### 7.4 神経修飾場と確率共鳴（`draft_front_comp_neuro.md`, `recipe_sr.md`）
+### 7.4 神経修飾場と確率共鳴（`idea_neuromod.md`）
 
 **最も成功した主張**: ノイズ場は単一の共有重み集合に多重化された複数の方策を**アドレスする**が、
 それは記号的な「鍵（look-up key）」ではなく**最適強度をもつ機能的資源**である。
@@ -1470,6 +1470,11 @@ NG-RC 0.078@562 params 対 本系 0.360@3265）、存在理由は固有性質と
 
 **本体理論への還元**: 第 2.6 節（analytic は sample の忠実な縮約ではない）。
 これは NNN の 3 実装水準の関係についての、最も重要な非自明な事実である。
+
+**生物対応づけの制約**（`idea_neuromod.md` §5）: 修飾物質を $\sigma_k$ の絶対値に対応づけてはいけない。
+ゲージ依存量だからである。対応づけるべきは $\rho$（制御量）か $\nu_k$（観測量）、実質的には
+「しきい値までの距離を膜電位ゆらぎの標準偏差で測った量」であり、生物側でもこれは
+平均膜電位（$h$ 側）と背景シナプス入力の分散（$\sigma$ 側）という二つのつまみに対応する。
 
 ### 7.5 符号化様式（`idea_coding.md`）
 
@@ -1550,9 +1555,9 @@ NG-RC 0.078@562 params 対 本系 0.360@3265）、存在理由は固有性質と
 | `idea_rl.md` | score-as-$\delta$・PPO v4 | 第 7.2 節 |
 | `idea_reservoir.md` | 散逸ノイズ場・$\theta$ 凍結 | 第 4.7, 7.3 節 |
 | `idea_coding.md` | $\Gamma$・時間軸・輸送 | 第 3.4, 4.8, 7.5 節 |
-| `draft_front_comp_neuro.md`, `recipe_sr.md` | SR・神経修飾場 | 第 2.6, 7.4 節 |
+| `idea_neuromod.md` | SR・神経修飾場 | 第 2.6, 7.4 節 |
 | `idea_fpga.md` | ハードウェア | 第 7.6 節 |
-| `draft_tcds.md` | 資源制御としての $\rho$ | 第 3.5, 7.1 節 |
+| `idea_consolidation.md` | 資源制御としての $\rho$ | 第 3.5, 7.1 節 |
 | `idea_multivalued.md` | 多値化 | 本稿未収録 |
 
 ## 付録 B. コード対応表
@@ -1575,5 +1580,5 @@ NG-RC 0.078@562 params 対 本系 0.360@3265）、存在理由は固有性質と
 | RL 正典 | `tmp/rl/ppo.py` | PPO v4 |
 | Consolidation | `tmp/consolidation/core.py` | `ConsolidableNNN`, `kill_unit`, `anneal_unit`, `CovJacTrainer` |
 | Reservoir | `tmp/reservoir/nnn_map.py: NoiseModulatedMap` | (B)-mix。numpy・解析形 |
-| SR 曲線 | `tmp/sr_separation_curve.py` | `--sweep train --model sample` が厳密版。`recipe_sr.md` は `examples/` を参照しているが実体は `tmp/` にある |
-| 行動デモ | `tmp/neuromodulated_behavior_modes.py` | 共有重み + 3 ノイズ場 |
+| SR 曲線 | `tmp/neuromod_sr_curve.py` | `--sweep train --model sample` が厳密版。手順は `idea_neuromod.md` 付録 A |
+| 行動デモ | `tmp/neuromod_behavior_modes.py` | 共有重み + 3 ノイズ場 |

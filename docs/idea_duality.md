@@ -6,7 +6,7 @@ Fluctuations in Noise-modulated Neural Networks"）の**続編**として、ノ�
 主張と噛み合っていない点と、その解消方針を記録する。
 
 関連: `docs/forward_noise_covariance_learning.md`（FNCL の技術ノート）、
-`docs/recipe_sr.md`（確率共鳴カーブ、Frontiers 向け）。
+`docs/idea_neuromod.md`（神経修飾場の研究ノート、確率共鳴カーブ、Frontiers 向け）。
 
 ## 現状（2026-07-17）
 
@@ -135,7 +135,7 @@ $$y = f(x; \theta, \mathcal{P})$$
 1. **分離可能性**。θ を固定したまま P を切り替えるだけで、同一
    ネットワークが別のタスクを解ける。`P_A → sin(x)`、`P_B → sin(2x)` を 1 つの
    θ の上に多重化できる。P はシンボリックな「鍵」ではなく、確率共鳴の最適強度を
-   持つ機能的資源として振る舞う（`recipe_sr.md` の逆 U 字と整合）。
+   持つ機能的資源として振る舞う（`idea_neuromod.md` §6 の逆 U 字と整合）。
    （§12.3: 連動下でこの多重化を担うのは 2 つの場の**比** $\sigma_B/\sigma_A$ で
    あり、共通成分はゲージである。多重化そのものは残るが、担い手が変わる。）
 2. **対称性（どちらも独立に学習信号を運べる）**。θ を凍結して P だけ動かしても
@@ -347,7 +347,7 @@ Frontiers「Computational Models of Neuromodulation」特集（締切 2026-09-11
 
 - **Frontiers** = 神経修飾の枠組み。主張は「ノイズ場が共有重みに多重化された
   方策を*アドレスする*、最適強度を持つ機能的資源（SR）」。主図は
-  `examples/sr_separation_curve.py --sweep train --model sample` の逆 U 字。
+  `tmp/neuromod_sr_curve.py --sweep train --model sample` の逆 U 字。
   **場は与えるもの**で、学習則の話はしない。
 - **NCE 続編** = 学習則の枠組み。主張は「その場自身が、backprop を再構成したのと
   同じ前向き共分散 credit で学習される」。多重化（P_A/P_B）は場が学習可能で
