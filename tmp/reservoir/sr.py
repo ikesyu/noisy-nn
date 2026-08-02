@@ -3,7 +3,7 @@
 
 The question: in (B)-mix, is the additive noise a functional RESOURCE, or just a
 smooth way to implement a monotone nonlinearity? The test ports the classic SR
-curve (recipe_sr.md) into the reservoir: with the SAME trained weights (d, M, c),
+curve (idea_neuromod.md) into the reservoir: with the SAME trained weights (d, M, c),
 sweep the global noise strength s and score BOTH crossing responses:
 
     analytic (mean-field): z_k = 2 Phi(d_k/sigma_k) (1 - Phi(d_k/sigma_k))   -- h=0

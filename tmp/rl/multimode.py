@@ -1,5 +1,5 @@
 """tmp/rl.multimode -- reward learning of two behaviors multiplexed on ONE weight set,
-addressed by the noise field (Sub-B core, §7.2 / §14.2; RL version of front_comp L1).
+addressed by the noise field (Sub-B core, §7.2 / §14.2; RL version of idea_neuromod.md L1).
 
 Each episode is assigned a regime r; the policy runs under noise field P_r (a recruitment
 field over a disjoint subnetwork).  The regime is hidden from the observation, so the field

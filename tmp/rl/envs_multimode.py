@@ -6,7 +6,7 @@ agent must drive x to targets[r] and stay.  Crucially the regime is NOT in the o
 (the observation is only the position x): the ONLY thing that tells the agent which target
 to seek is its noise field.  So the field must act as the behavioral mode (§7.2, §14.2) --
 fixing the field should commit the behavior; switching it should switch the target with the
-SAME shared weights (the RL version of front_comp's L1 addressing result).
+SAME shared weights (the RL version of idea_neuromod.md's L1 addressing result).
 """
 from __future__ import annotations
 

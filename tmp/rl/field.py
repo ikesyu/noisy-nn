@@ -71,7 +71,7 @@ def overlapping_pair(H, sigma, recruit_frac=0.7, n_layers=2):
     """Two recruitment fields whose active units OVERLAP (recruit_frac>0.5).  P0 recruits
     the first `block` units, P1 the last `block`; the middle is SHARED.  Returns the two
     fields plus the last-hidden index sets (shared / p0_only / p1_only) for the lesion
-    test (front_comp L2: do shared units carry BOTH behaviors, i.e. multiplexing, or did
+    test (idea_neuromod.md L2: do shared units carry BOTH behaviors, i.e. multiplexing, or did
     the net partition into disjoint groups?)."""
     block = min(max(int(round(H * recruit_frac)), 1), H)
     v0 = torch.zeros(H)

@@ -2,7 +2,7 @@
 §13.1): is the additive noise a functional RESOURCE, or just a smooth way to
 implement a monotone nonlinearity?
 
-Same-weights diagnostic (recipe_sr.md §9 TODO). Train ONE mixed (B) map with the
+Same-weights diagnostic (idea_neuromod.md §8 TODO). Train ONE mixed (B) map with the
 analytic (mean-field) crossing, freeze (d, M, c), then sweep the global noise
 strength s and score BOTH crossing responses on the SAME weights:
     analytic  z = 2 Phi(d/sigma)(1-Phi(d/sigma))              (mean-field, h=0)
