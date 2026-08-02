@@ -1,10 +1,10 @@
 """
-examples/sr_separation_curve.py
+tmp/neuromod_sr_curve.py
 
 Stochastic-resonance (SR) signature of neuromodulator-like noise-field recruitment
 ==================================================================================
 
-This is a diagnostic companion to `neuromodulated_behavior_modes.py`.  It asks a
+This is a diagnostic companion to `neuromod_behavior_modes.py`.  It asks a
 single question:
 
     Is the noise field a FUNCTIONAL RESOURCE with an optimal strength -- i.e. does
@@ -45,7 +45,7 @@ Caveat: the network here is `SimpleNNNAnalytic` (the deterministic EXPECTATION o
 the noisy crossing) and it is trained at one base level, so task-error(s) is
 minimised near the trained level by construction.  separation(s)/signal(s) are not
 the training objective, so their optimum is a more honest SR signal.  The rigorous
-follow-ups (see neuromodulated_behavior_modes notes) are: (a) repeat with
+follow-ups (see neuromod_behavior_modes notes) are: (a) repeat with
 `SimpleNNNSample` (real injected noise), and (b) a training-level sweep.
 
 Model variants (--model)
@@ -73,15 +73,15 @@ Two sweeps (--sweep)
 
 Run
 ---
-    python examples/sr_separation_curve.py
-    python examples/sr_separation_curve.py --sweep train --train-steps 13
-    python examples/sr_separation_curve.py --model sample --epochs 1200 --samples 64
-    python examples/sr_separation_curve.py --sweep train --model sample --grid-side 21 \
+    python tmp/neuromod_sr_curve.py
+    python tmp/neuromod_sr_curve.py --sweep train --train-steps 13
+    python tmp/neuromod_sr_curve.py --model sample --epochs 1200 --samples 64
+    python tmp/neuromod_sr_curve.py --sweep train --model sample --grid-side 21 \
         --epochs 1000 --train-steps 9
 
-    python examples/sr_separation_curve.py --sweep train --model sample --grid-side 21 --epochs 1000 --train-steps 9   # 厳密なSR（内点最適）
-    python examples/sr_separation_curve.py --sweep train --model analytic                                              # 対照（端点最適＝SRなし）
-    python examples/sr_separation_curve.py                                                                             # 従来のテスト時スイープ（既定）
+    python tmp/neuromod_sr_curve.py --sweep train --model sample --grid-side 21 --epochs 1000 --train-steps 9   # 厳密なSR（内点最適）
+    python tmp/neuromod_sr_curve.py --sweep train --model analytic                                              # 対照（端点最適＝SRなし）
+    python tmp/neuromod_sr_curve.py                                                                             # 従来のテスト時スイープ（既定）
     （記憶にも要点を記録しました。）補足の TODO 候補：高σ側の減衰は穏やかなので、より明瞭な逆U字の裾を出すには σ の上限を広げる（例：〜5）と良いです。また Analytic と E[Sample] の重ね描きで「平均場 vs 機構」を1枚にする案も、必要になれば追加できます。
 
 Data export
@@ -89,7 +89,7 @@ Data export
 Pass --save PATH to write the swept curve to a CSV (metadata in leading '#' comments;
 columns x, separation, signal, task_err), and --no-show for headless batch runs.
 Read back with numpy.loadtxt(PATH, delimiter=',').  These CSVs are the inputs to the
-paper figures (see docs/recipe_sr.md for which runs make which plot).
+paper figures (see docs/idea_neuromod.md for which runs make which plot).
 
 Requires only numpy, torch, matplotlib.  Without --save, no files are written.
 """
@@ -107,12 +107,18 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# Reuse the behaviour-demo module (its top level only defines things; main() is
-# guarded by __main__, so importing it is side-effect free).
-EXAMPLES_DIR = Path(__file__).resolve().parent
-if str(EXAMPLES_DIR) not in sys.path:
-    sys.path.insert(0, str(EXAMPLES_DIR))
-import neuromodulated_behavior_modes as demo
+# The benchmark itself (problem, fields, protocol) lives in tmp/neuromod.
+ROOT = Path(__file__).resolve().parents[1]
+TMP_DIR = Path(__file__).resolve().parent
+for _p in (str(ROOT), str(TMP_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from nnn import model as nnn_model
+from neuromod import fields as F
+from neuromod import protocol as P
+from neuromod import world
+
+N_HIDDEN = 2                      # this script's fixed [6, H, H, 2] convention
 
 
 def build_model(kind: str, hidden: int, base_std: float, h: float, t: int):
@@ -126,55 +132,44 @@ def build_model(kind: str, hidden: int, base_std: float, h: float, t: int):
     """
     structure = [6, hidden, hidden, 2]
     if kind == "analytic":
-        return demo.model.SimpleNNNAnalytic(structure=structure, std=base_std)
+        return nnn_model.SimpleNNNAnalytic(structure=structure, std=base_std)
     if kind == "sample":
-        return demo.model.SimpleNNNSample(structure=structure, std=base_std, h=h, t=t)
+        return nnn_model.SimpleNNNSample(structure=structure, std=base_std, h=h, t=t)
     if kind == "statistic":
-        return demo.model.SimpleNNNStatistic(structure=structure, std=base_std, h=h, t=t)
+        return nnn_model.SimpleNNNStatistic(structure=structure, std=base_std, h=h, t=t)
     raise ValueError(f"unknown model kind '{kind}'")
 
 
 def build_data(grid_side: int, gamma: float, device: torch.device):
     """Scripted scene -> grid observations and the three per-state target fields."""
-    objects = demo.make_scripted_objects()
-    positions = demo.make_training_grid(grid_side)
-    obs_np = demo.encode_observations(positions, objects)                 # [N, 6]
+    objects = world.make_scripted_objects()
+    positions = world.make_training_grid(grid_side)
+    obs_np = world.encode_observations(positions, objects)                # [N, 6]
     obs = torch.tensor(obs_np, dtype=torch.float32, device=device)
     targets = {s: torch.tensor(
-                   demo.make_mixed_behavior_targets(obs_np, demo.ALPHA_STATES[s],
-                                                    gamma=gamma),
+                   world.make_mixed_behavior_targets(obs_np, world.ALPHA_STATES[s],
+                                                     gamma=gamma),
                    dtype=torch.float32, device=device)
-               for s in demo.STATES}
+               for s in world.STATES}
     return obs, targets
 
 
-def make_fields(peak_std: float, sigma: float, theta: float, device: torch.device):
-    """The three category noise fields at a given peak recruited-unit std."""
-    return {c: demo.make_noise_field(demo.FIELD_CENTERS[c], float(peak_std), sigma,
-                                     theta).to(device)
-            for c in demo.CATEGORIES}
+def make_fields(peak_std: float, sigma: float, theta: float, device: torch.device,
+                hidden: int = 64, radius: float = 0.28):
+    """The three category noise fields at a given peak recruited-unit std.
+
+    Centres sit on a ring so every pair overlaps equally; see `neuromod.fields`.
+    """
+    return {c: f.to(device) for c, f in F.build_fields(
+        world.CATEGORIES, hidden, float(peak_std), sigma, theta,
+        radius=radius).items()}
 
 
 def measure_capability(net: nn.Module, obs: torch.Tensor, targets: dict,
                        fields: dict, device: torch.device):
-    """Return (separation, signal, task_err) of `net` under the given noise fields.
-
-    separation = mean pairwise ||y_i - y_j|| between the three fields' output fields;
-    signal     = mean stimulus-locked variation ||y - mean_obs(y)|| (input-driven);
-    task_err   = mean over states of MSE(recruited output, trained target).
-    """
-    cats = demo.CATEGORIES
-    with torch.no_grad():
-        y = {c: demo.evaluate_vector_field(net, obs, fields[c]).cpu().numpy()
-             for c in cats}                                               # each [N, 2]
-    separation = (np.linalg.norm(y["food"] - y["threat"], axis=1).mean()
-                  + np.linalg.norm(y["food"] - y["shelter"], axis=1).mean()
-                  + np.linalg.norm(y["threat"] - y["shelter"], axis=1).mean()) / 3.0
-    signal = np.mean([np.linalg.norm(y[c] - y[c].mean(axis=0, keepdims=True),
-                                     axis=1).mean() for c in cats])
-    task_err = np.mean([np.mean((y[demo.STATE_TO_FIELD[s]] - targets[s].cpu().numpy())
-                                ** 2) for s in demo.STATES])
-    return float(separation), float(signal), float(task_err)
+    """(separation, signal, task_err) under the given fields; see `protocol.capability`."""
+    return P.capability(net, obs, targets, fields, world.CATEGORIES, world.STATES,
+                        world.STATE_TO_FIELD, N_HIDDEN)
 
 
 def build_and_train(kind: str, epochs: int, lr: float, base_std: float, sigma: float,
@@ -186,8 +181,8 @@ def build_and_train(kind: str, epochs: int, lr: float, base_std: float, sigma: f
     so the SR curve is self-consistent.  Returns (net, obs, targets, base_fields).
     """
     obs, targets = build_data(grid_side, gamma, device)
-    base_fields = make_fields(base_std, sigma, theta, device)
-    state_fields = {s: base_fields[demo.STATE_TO_FIELD[s]] for s in demo.STATES}
+    base_fields = make_fields(base_std, sigma, theta, device, hidden)
+    state_fields = {s: base_fields[world.STATE_TO_FIELD[s]] for s in world.STATES}
 
     net = build_model(kind, hidden, base_std, h, t).to(device)
     extra = f", h={h}, t={t}" if kind != "analytic" else ""
@@ -196,13 +191,14 @@ def build_and_train(kind: str, epochs: int, lr: float, base_std: float, sigma: f
     if kind != "analytic":
         print("  (sample/statistic inject real noise -> slower & a bit noisier; "
               "reduce --epochs / --grid-side if needed)")
-    demo.train(net, obs, targets, state_fields, epochs, lr)
+    P.train(net, obs, targets, state_fields, world.STATES, N_HIDDEN,
+            epochs, lr)
     return net, obs, targets, base_fields
 
 
 def sr_scan(net: nn.Module, obs: torch.Tensor, targets: dict,
             s_values: np.ndarray, sigma: float, theta: float,
-            device: torch.device):
+            device: torch.device, hidden: int = 64):
     """Sweep the peak recruited-unit std s and measure separation / signal / error.
 
     For each s we rebuild each category's noise field with peak std = s (same active
@@ -215,7 +211,7 @@ def sr_scan(net: nn.Module, obs: torch.Tensor, targets: dict,
     signal = np.zeros_like(s_values)
     task_err = np.zeros_like(s_values)
     for k, s in enumerate(s_values):
-        fields_s = make_fields(s, sigma, theta, device)
+        fields_s = make_fields(s, sigma, theta, device, hidden)
         separation[k], signal[k], task_err[k] = measure_capability(
             net, obs, targets, fields_s, device)
     return separation, signal, task_err
@@ -239,11 +235,12 @@ def train_level_sweep(kind: str, sigma_values: np.ndarray, epochs: int, lr: floa
     task_err = np.zeros_like(sigma_values)
 
     for i, st in enumerate(sigma_values):
-        fields = make_fields(st, sigma, theta, device)
-        state_fields = {s: fields[demo.STATE_TO_FIELD[s]] for s in demo.STATES}
+        fields = make_fields(st, sigma, theta, device, hidden)
+        state_fields = {s: fields[world.STATE_TO_FIELD[s]] for s in world.STATES}
         net = build_model(kind, hidden, float(st), h, t).to(device)
         with contextlib.redirect_stdout(io.StringIO()):        # hush per-epoch logs
-            demo.train(net, obs, targets, state_fields, epochs, lr)
+            P.train(net, obs, targets, state_fields, world.STATES,
+                    N_HIDDEN, epochs, lr)
         separation[i], signal[i], task_err[i] = measure_capability(
             net, obs, targets, fields, device)
         print(f"  sigma_train={st:5.2f} -> signal={signal[i]:.3f}  "
@@ -315,7 +312,7 @@ def save_curves(path: str, x_values, separation, signal, task_err, args, x_name:
     k = int(np.argmax(signal))
     interior = 0 < k < len(x_values) - 1
     with open(path, "w") as f:
-        f.write("# SR sweep data  (examples/sr_separation_curve.py)\n")
+        f.write("# SR sweep data  (tmp/neuromod_sr_curve.py)\n")
         f.write(f"# model={args.model} sweep={args.sweep} x_variable={x_name}\n")
         f.write(f"# base_std={args.base_std} sigma={args.sigma} theta={args.theta} "
                 f"target_gamma={args.target_gamma}\n")
@@ -381,8 +378,7 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    if args.hidden_dim != demo.GRID_SIZE * demo.GRID_SIZE:
-        raise ValueError(f"--hidden-dim must be {demo.GRID_SIZE ** 2}")
+    F.sheet_side(args.hidden_dim)      # raises unless the sheet is square
     device = torch.device("cpu")
 
     print("Model variants selectable via --model: analytic | sample | statistic")
@@ -415,7 +411,8 @@ def main() -> None:
             args.crossing_h, args.samples, device)
         x_values = np.clip(np.linspace(args.s_min, args.s_max, args.s_steps), 1e-3, None)
         separation, signal, task_err = sr_scan(net, obs, targets, x_values,
-                                               args.sigma, args.theta, device)
+                                               args.sigma, args.theta, device,
+                                               args.hidden_dim)
         xlabel = "test-time noise strength  s  =  peak recruited-unit std"
         trained_level = args.base_std
 
