@@ -1,4 +1,4 @@
-"""rl_itemp_swingup -- §25 Stage 1: INTERNAL exploration temperature on the
+"""rl_ppo_itemp_swingup (旧 rl_itemp_swingup) -- §25 Stage 1: INTERNAL exploration temperature on the
 no-stopper swing-up (§23.13 setup).
 
 The external sigma_e is removed: the executed action is one of the policy NNN's own
@@ -12,7 +12,7 @@ and the noise FIELD controls it.  Two arms:
 
 Baseline for go/no-go: §23.13 external-sigma_e run (tail mean 0.52, full success ~1/12).
 
-    .venv/bin/python tmp/rl_itemp_swingup.py --updates 300 --seed 0 --cold 0.3
+    .venv/bin/python tmp/rl_ppo_itemp_swingup.py --updates 300 --seed 0 --cold 0.3
 Output: tmp/out/swingup_itemp_{tag}_s{seed}.pt, tmp/out/itemp_{tag}_curves.png
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from rl.ppo import train_ppo_nnn
 from rl.envs_swingup import CartPoleSwingUp
 from rl.a2c_swingup import build_policy, _set_field
-from rl_ppo_nowall import plot_curves, WALL_PENALTY, X_BARRIER, ALIVE_BONUS
+from rl_ppo_external_swingup import plot_curves, WALL_PENALTY, X_BARRIER, ALIVE_BONUS
 
 OUT = Path(__file__).resolve().parent / "out"
 SIGMA0 = 0.6

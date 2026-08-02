@@ -81,7 +81,7 @@ from . import credit as C
 from .envs_swingup import CartPoleSwingUp
 from .train import ManualOpt, RunningNorm
 from .multimode import _p
-from .a2c_swingup import _norm
+from .a2c_swingup import _norm, _snapshot
 from .a2c_nnncritic import _snap
 
 
@@ -94,6 +94,7 @@ class QNNN(torch.nn.Module):
         self.net = model.SimpleNNNSample(structure=structure, std=std, h=h, t=t,
                                          output_bias=True)
         self.t = t
+        self.hidden = hidden
 
     @property
     def crossings(self):
@@ -123,11 +124,16 @@ class QNNN(torch.nn.Module):
 
 
 def _pi_forward(policy, s):
-    """Batched policy forward at states s [B, 5]: returns (mu [B], sig_mu [B], step)."""
+    """Batched policy forward at states s [B, 5]: returns (mu, sig_mu, var_meas, step).
+    var_meas is the per-state MEASURED marginal variance (the §25.6 accounting: ensemble
+    spread * (1+1/T), absolute floor) -- in internal mode it includes the readout noise
+    sigma_out because rollout_step stores the noisy samples."""
     step = policy.rollout_step(s, greedy=True)               # greedy: internals + mu only
     mu = step.p.squeeze(1)
-    sig_mu = step.y_samples.squeeze(-1).std(dim=1) / math.sqrt(policy.t)
-    return mu, sig_mu, step
+    ys = step.y_samples.squeeze(-1)                          # [B, T]
+    sig_mu = ys.std(dim=1) / math.sqrt(policy.t)
+    var_meas = (ys.var(dim=1) * (1.0 + 1.0 / policy.t)).clamp_min(policy.var_floor)
+    return mu, sig_mu, var_meas, step
 
 
 def _logpi(a, mu, var_t):
@@ -137,15 +143,43 @@ def _logpi(a, mu, var_t):
 def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
                   gamma=0.99, tau=0.01, lr_actor=0.003, lr_critic=0.02, alpha=0.1,
                   batch=64, rounds=32, act_samples=8, warmup_eps=5, replay_cap=60000,
-                  sigma_explore=0.3, bottom_frac=0.5, force_mag=20.0, x_threshold=4.0,
+                  sigma_explore=0.3, bottom_frac=0.5, top_frac=0.0, top_range=0.3,
+                  force_mag=20.0, x_threshold=4.0,
                   reward_scale=0.05, mirror_beta=0.1, actor_mode="fresh", clip_eps=0.2,
-                  checkpoint_every=25, verbose=True):
+                  checkpoint_every=25, verbose=True,
+                  wall_mode="stop", wall_penalty=None, x_barrier=0.0, alive_bonus=0.0,
+                  internal_noise=False, sigma_out=0.35,
+                  alpha_auto=False, h_target=-1.0, lr_alpha=3e-3,
+                  temp_reg=False, temp_target=0.35, lr_temp=0.05):
+    # v6 (§25.7 SAC revisit): internal_noise replaces the external sigma_e with the
+    # policy NNN's own ensemble (readout noise field sigma_out constant), and every
+    # log pi / score / importance ratio uses the per-state MEASURED variance (§25.6:
+    # the ensemble as a state-wise variance meter -- the decisive mechanism of the
+    # PPO win).  alpha_auto adds the standard max-entropy dual ascent on alpha, which
+    # becomes meaningful for the first time: the policy entropy is now a measured
+    # physical quantity instead of a hand-fixed sigma_e (§23.11 limitation lifted).
+    #
+    # v6.1 temp_reg (the TRUE Stage-3 piece, motivated by the v6 negative result):
+    # under SAC updates the emergent internal temperature RUNS AWAY (measured std
+    # 0.35 -> 0.9 as the weights grow), collapsing collection into wall deaths; and
+    # alpha cannot fix it -- alpha only PRICES entropy, it has no physical handle on
+    # it.  The regulator closes the loop on the physical dial instead: a global
+    # temperature multiplier rho_T scales the body noise field AND sigma_out, updated
+    # once per episode by log-proportional control toward temp_target:
+    #     rho_T <- rho_T * exp(lr_temp * (temp_target - temp_measured)/temp_target).
+    # This is exploration-temperature LEARNING on a field quantity (§25.4 Stage 3 in
+    # setpoint form; a reward-driven target is the remaining generalization).
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     env = CartPoleSwingUp(horizon=horizon, seed=seed, force_mag=force_mag,
-                          x_threshold=x_threshold, continuous=True)
+                          x_threshold=x_threshold, continuous=True,
+                          wall_mode=wall_mode, wall_penalty=wall_penalty,
+                          x_barrier=x_barrier, alive_bonus=alive_bonus)
     policy = ContinuousNNNPolicy(obs_dim=5, hidden=H, std=sigma, t=64,
-                                 force_max=force_mag, sigma_explore=sigma_explore)
+                                 force_max=force_mag, sigma_explore=sigma_explore,
+                                 noise_mode="internal" if internal_noise else "external")
+    if internal_noise:
+        policy.sigma_out = sigma_out
     q1, q2 = QNNN(5, hidden=Hq, std=sigma, t=64), QNNN(5, hidden=Hq, std=sigma, t=64)
     q1t, q2t = copy.deepcopy(q1), copy.deepcopy(q2)
     akeys = C.param_keys(policy)
@@ -159,15 +193,17 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
     var_e = sigma_explore ** 2
     y_clamp = 4.0 * reward_scale / (1 - gamma)               # |r|<~4 -> principled bound
 
-    # replay (normalized obs); mu_old / sig_mu_old at collection feed the (ii) ratio
-    buf_s, buf_a, buf_r, buf_s2, buf_d, buf_mu, buf_sm = [], [], [], [], [], [], []
+    # replay (normalized obs); mu_old / sig_mu_old / var_old at collection feed the
+    # (ii) ratio and the measured-variance accounting
+    buf_s, buf_a, buf_r, buf_s2, buf_d, buf_mu, buf_sm, buf_var = \
+        [], [], [], [], [], [], [], []
 
-    def _push(s, a, r, s2, d, mu_o, sm_o):
+    def _push(s, a, r, s2, d, mu_o, sm_o, var_o):
         if len(buf_s) >= replay_cap:
-            for b in (buf_s, buf_a, buf_r, buf_s2, buf_d, buf_mu, buf_sm):
+            for b in (buf_s, buf_a, buf_r, buf_s2, buf_d, buf_mu, buf_sm, buf_var):
                 b.pop(0)
         buf_s.append(s); buf_a.append(a); buf_r.append(r); buf_s2.append(s2)
-        buf_d.append(d); buf_mu.append(mu_o); buf_sm.append(sm_o)
+        buf_d.append(d); buf_mu.append(mu_o); buf_sm.append(sm_o); buf_var.append(var_o)
 
     def _sample(B):
         idx = rng.integers(0, len(buf_s), size=B)
@@ -178,7 +214,8 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
         d = torch.tensor([buf_d[i] for i in idx], dtype=torch.float32)
         mu_o = torch.tensor([buf_mu[i] for i in idx], dtype=torch.float32)
         sm_o = torch.tensor([buf_sm[i] for i in idx], dtype=torch.float32)
-        return s, a, r, s2, d, mu_o, sm_o
+        var_o = torch.tensor([buf_var[i] for i in idx], dtype=torch.float32)
+        return s, a, r, s2, d, mu_o, sm_o, var_o
 
     def _q_update(qnet, qopt, qmir, s_a, y_std):
         q_pred, step = qnet.q_step(s_a)
@@ -192,25 +229,42 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
             qmir.kp_track(qnet)
         return float(((q_pred - y_std) ** 2).mean())
 
-    hist, checkpoints = [], []
+    log_alpha = math.log(alpha)
+    rho_T = 1.0
+    hist, stats, checkpoints = [], [], []
     for epi in range(episodes):
-        # ---- collection (per-step N=1, intrinsic exploration sigma_e fixed) ----
-        start = (math.pi + float(rng.uniform(-0.5, 0.5)) if rng.random() < bottom_frac
-                 else float(rng.uniform(-math.pi, math.pi)))
+        if temp_reg:
+            policy.field = [torch.full((H,), sigma * rho_T) for _ in range(2)]
+            policy.sigma_out = sigma_out * rho_T
+        # ---- collection (per-step N=1, intrinsic exploration) ----
+        u = rng.random()
+        if u < bottom_frac:
+            start = math.pi + float(rng.uniform(-0.5, 0.5))
+        elif u < bottom_frac + top_frac:
+            start = float(rng.uniform(-top_range, top_range))
+        else:
+            start = float(rng.uniform(-math.pi, math.pi))
         obs, _ = env.reset(seed=None, start_theta=start)
         on = _norm(norm, obs, True)
-        ep_ret = 0.0
+        ep_ret, temp_sum, nstep = 0.0, 0.0, 0
         for _ in range(horizon):
             step = policy.rollout_step(on.unsqueeze(0))
+            if internal_noise:
+                spread2 = float(step.y_samples.var().item())
+                var_c = max(spread2 * (1.0 + 1.0 / policy.t), policy.var_floor)
+            else:
+                var_c = sigma_explore ** 2
             a_unc = (float(step.p.item())
-                     + float(step.score.item()) * sigma_explore ** 2)   # (iv) unclamped
+                     + float(step.score.item()) * var_c)                # (iv) unclamped
             sm_o = float(step.y_samples.std()) / math.sqrt(policy.t)
             obs, r, te, tr, _ = env.step(float(step.action.item()))
             on2 = _norm(norm, obs, True)
             _push(on, a_unc, r * reward_scale, on2, float(te),
-                  float(step.p.item()), sm_o)
+                  float(step.p.item()), sm_o, var_c)
             on = on2
             ep_ret += r
+            temp_sum += math.sqrt(var_c)
+            nstep += 1
             if te or tr:
                 break
         hist.append(ep_ret)
@@ -220,17 +274,25 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
             continue
         qloss = wmean = 0.0
         for _ in range(rounds):
-            s, a, r, s2, d, mu_o, sm_o = _sample(batch)
+            s, a, r, s2, d, mu_o, sm_o, var_o = _sample(batch)
+            alpha_t = math.exp(log_alpha)
             with torch.no_grad():
                 # soft TD target from the CURRENT policy at s'
-                mu2, sig_mu2, _ = _pi_forward(policy, s2)
-                var2 = var_e + sig_mu2 ** 2                            # (i) marginal
-                a2 = mu2 + sigma_explore * torch.randn_like(mu2)
+                mu2, sig_mu2, varm2, _ = _pi_forward(policy, s2)
+                var2 = varm2 if internal_noise else (var_e + sig_mu2 ** 2)  # (i)
+                a2 = mu2 + var2.sqrt() * torch.randn_like(mu2) if internal_noise \
+                    else mu2 + sigma_explore * torch.randn_like(mu2)
                 logp2 = _logpi(a2, mu2, var2)
                 sa2 = torch.cat([s2, a2.unsqueeze(1)], dim=1)
                 qmin_t = torch.minimum(q1t.q_eval(sa2), q2t.q_eval(sa2))
-                y = (r + gamma * (1 - d) * (qmin_t - alpha * logp2)
+                y = (r + gamma * (1 - d) * (qmin_t - alpha_t * logp2)
                      ).clamp(-y_clamp, y_clamp)             # fixed-scale, bounded target
+            if alpha_auto:
+                # dual ascent on the entropy price: measured policy entropy vs target.
+                # Meaningful only now that the entropy is a PHYSICAL, measured quantity
+                # (internal noise); with fixed external sigma_e it was a constant.
+                log_alpha += lr_alpha * float((logp2.mean() + h_target).item())
+                log_alpha = min(max(log_alpha, math.log(1e-3)), math.log(1.0))
 
             sa = torch.cat([s, a.unsqueeze(1)], dim=1)
             qloss = _q_update(q1, q1_opt, m1, sa, y)
@@ -241,10 +303,11 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
             # action-Q covariance -- the same trick as the KDE slope's antithetic pair),
             # and the Q used to rank actions is averaged over 2 stochastic passes to
             # push its evaluation noise below the action-sensitivity signal.
-            mu, sig_mu, astep = _pi_forward(policy, s)
-            var_t = var_e + sig_mu ** 2                                # (i)
+            mu, sig_mu, varm, astep = _pi_forward(policy, s)
+            var_t = varm if internal_noise else (var_e + sig_mu ** 2)  # (i)
             K = act_samples
-            half = torch.abs(torch.randn(len(mu), K // 2)) * sigma_explore
+            scale = var_t.sqrt().unsqueeze(1) if internal_noise else sigma_explore
+            half = torch.abs(torch.randn(len(mu), K // 2)) * scale
             a_k = mu.unsqueeze(1) + torch.cat([half, -half], dim=1)    # [B,K] antithetic
             with torch.no_grad():
                 sa_k = torch.cat([s.repeat_interleave(K, dim=0),
@@ -272,7 +335,7 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
                 score = r_use * adv * (a - mu) / var_t
             else:
                 logp = _logpi(a_k, mu.unsqueeze(1), var_t.unsqueeze(1))    # [B,K]
-                w = qmin - alpha * logp                                    # soft-Q weight
+                w = qmin - alpha_t * logp                                  # soft-Q weight
                 w = w - w.mean(dim=1, keepdim=True)                        # PER-STATE baseline
                 w = w / (w.std() + 1e-6)                                   # global scale only
                 # shared-internals composition: sum_k w_k (a_k - mu) / (K var_t)
@@ -292,11 +355,30 @@ def train_sac_nnn(seed=0, H=128, Hq=64, sigma=0.6, episodes=300, horizon=400,
                     for pt, p in zip(qt.parameters(), q.parameters()):
                         pt.mul_(1 - tau).add_(tau * p)
 
+        temp_meas = temp_sum / max(1, nstep)
+        if temp_reg:
+            rho_T *= math.exp(lr_temp * (temp_target - temp_meas) / temp_target)
+            rho_T = min(max(rho_T, 0.15), 1.5)
+        stats.append({"epi": epi + 1, "ep_return": float(ep_ret),
+                      "ret_step": float(ep_ret / max(1, nstep)),
+                      "ep_len": nstep, "qloss": float(qloss),
+                      "alpha": math.exp(log_alpha), "rho_T": rho_T,
+                      "temp": temp_meas})
         if checkpoint_every and (epi + 1) % checkpoint_every == 0:
-            checkpoints.append((epi + 1, _snap(policy, norm, H, force_mag,
-                                               None, 6.0, 0.0)))
+            if temp_reg and policy.field is not None:
+                # the trained mu depends on the regulated body field: store it (same
+                # field for both gate slots = constant field at eval time)
+                fld = [f.clone() for f in policy.field]
+                checkpoints.append((epi + 1, _snapshot(policy, norm, H, force_mag,
+                                                       fields=[fld, fld])))
+            else:
+                checkpoints.append((epi + 1, _snap(policy, norm, H, force_mag,
+                                                   None, 6.0, 0.0)))
         if verbose and (epi + 1) % 10 == 0:
             print(f"  [sac seed{seed}] epi {epi+1:4d}  ep_return/step "
-                  f"{np.mean(hist[-10:]) / horizon:+.3f}  qloss {qloss:.4f}  "
-                  f"Qmin(pi) {wmean:+.2f}  replay {len(buf_s)}")
-    return policy, (q1, q2), norm, checkpoints, hist
+                  f"{np.mean([s['ret_step'] for s in stats[-10:]]):+.3f}  "
+                  f"ep_len {np.mean([s['ep_len'] for s in stats[-10:]]):5.0f}  "
+                  f"qloss {qloss:.4f}  Qmin(pi) {wmean:+.2f}  "
+                  f"alpha {math.exp(log_alpha):.3f}  temp {stats[-1]['temp']:.2f}  "
+                  f"replay {len(buf_s)}", flush=True)
+    return policy, (q1, q2), norm, checkpoints, hist, stats

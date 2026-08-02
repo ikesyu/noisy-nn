@@ -1701,7 +1701,7 @@ Sub-B は場を「与えれば」行動をアドレスすることを示した�
 
 ### 23.11 SAC への NNN 統合の検証（2026-07-23 実施）＝ 実現可能：完全 NNN の off-policy SAC が swing-up + full balance を学習
 
-§23.10 の処方 (i)–(v) が **off-policy・replay・twin-Q・max-entropy** という SAC の体制まで cov_jac を運べるかを検証した（多 seed 化に優先。ユーザ指定）。実装は `tmp/rl/sac.py`（設計と負の結果の理由をコメントで内包）、ドライバ `tmp/rl_sac_swingup.py`、結果は `tmp/out/sac_s0_v*.log`・`tmp/out/swingup_sac_s0.pt`。
+§23.10 の処方 (i)–(v) が **off-policy・replay・twin-Q・max-entropy** という SAC の体制まで cov_jac を運べるかを検証した（多 seed 化に優先。ユーザ指定）。実装は `tmp/rl/sac.py`（設計と負の結果の理由をコメントで内包）、ドライバ `tmp/rl_sac_external_swingup.py`、結果は `tmp/out/sac_s0_v*.log`・`tmp/out/swingup_sac_s0.pt`。
 
 **設計（likelihood-ratio SAC）。** (1) **Twin Q-critic** は入力 $[s,a]$ の NNN（`QNNN`、2 隠れ層 H=64）で、TD 目標 $y=r+\gamma(1-d)\,(\min(Q_1',Q_2')(s',a')-\alpha\log\pi(a'|s'))$（$a'$ は現在方策から新規サンプル、$Q'$ は polyak target）への cov_jac 回帰。各 Q が専用 EMA mirror + KP を持つ。(2) **actor** は SAC 標準の reparameterization 勾配が使えない（Q を貫く backprop が要る）ため、同じ目的関数の **score-function 形** $\nabla J=\mathbb E_{a\sim\pi}[\nabla\log\pi\cdot(\min Q-\alpha\log\pi-b)]$ を採り、$\nabla\log\pi$ は cov_jac がそのまま供給する。(3) cov_jac の再帰が top score に**線形**であることを利用し、per-sample 重みを score に前乗せしてミニバッチ全体を1回の $[B,T,H]$ forward で処理する（バッチ化。従来の per-step ループ比で大幅に高速：0.4 秒/episode）。
 
@@ -1769,7 +1769,7 @@ cov_jac は (a) on-policy policy gradient（§23.1）、(b) 価値回帰 critic�
 
 ### 23.13 追試：ストッパ（壁）を使わない swing-up（2026-07-31〜08-01 実施）＝ 接触ゼロの振り上げ＋数秒保持まで成立、無期限保持は σ_e フロアが律速
 
-**動機と発見**。PPO v4 の canonical 方策（§23.10）を greedy 評価で精査したところ、**1 エピソードあたり 64–88 step もストッパ（|x| = x_thr の壁）に接触**しており、頂点保持を壁にもたれて実現していた（max|x| = 4.00 張り付き）。v4 の「full balance」は壁アシストを含む達成だった、という重要な但し書きである。そこで「**最終方策が壁を一切使わない** swing-up + balance」を同じ PPO v4 機構（完全 NNN・backprop ゼロ）で達成できるかを検証した。実装は `tmp/rl/envs_swingup.py` の拡張（`wall_mode` end/stop、`x_barrier`、`alive_bonus`、`top_center`）、`tmp/rl/ppo.py` の拡張（同パラメータ・`fill_batch`・warm start・`lr_var_scale`・開始角カリキュラム）、ドライバ `tmp/rl_ppo_nowall.py`。**判定は常に厳格評価**（壁接触で即終了の env、下垂れから greedy、horizon 500、3 env seeds）で行った。
+**動機と発見**。PPO v4 の canonical 方策（§23.10）を greedy 評価で精査したところ、**1 エピソードあたり 64–88 step もストッパ（|x| = x_thr の壁）に接触**しており、頂点保持を壁にもたれて実現していた（max|x| = 4.00 張り付き）。v4 の「full balance」は壁アシストを含む達成だった、という重要な但し書きである。そこで「**最終方策が壁を一切使わない** swing-up + balance」を同じ PPO v4 機構（完全 NNN・backprop ゼロ）で達成できるかを検証した。実装は `tmp/rl/envs_swingup.py` の拡張（`wall_mode` end/stop、`x_barrier`、`alive_bonus`、`top_center`）、`tmp/rl/ppo.py` の拡張（同パラメータ・`fill_batch`・warm start・`lr_var_scale`・開始角カリキュラム）、ドライバ `tmp/rl_ppo_external_swingup.py`。**判定は常に厳格評価**（壁接触で即終了の env、下垂れから greedy、horizon 500、3 env seeds）で行った。
 
 **設計反復の記録（9 構成、負の結果を含む）**：
 
@@ -1853,6 +1853,7 @@ cov_jac は (a) on-policy policy gradient（§23.1）、(b) 価値回帰 critic�
 | **SAC v3/v4：fresh サンプル方式**（§23.11） | 現在方策から新規サンプルした行動で actor 信号を作る（antithetic 対・Q の 2 パス平均も試行） | ハングは脱出するが壁アトラクタで停滞（best 0.21–0.38）。μ 近傍の Q 行動感度が評価ノイズ＋回帰残差に埋もれる SNR 限界 | 否定（負の結果） |
 | **SAC v5：replay 行動係留 ＋ noise-deadband 比**（§23.11） | actor 信号を実行済み replay 行動の soft advantage $A=Q(s,a_{\rm replay})-\overline{Q(s,a_k)}_K$ に係留し、off-policy 補正は §23.10 処方 (ii) の noise-deadband 付き重要度比 | **epi1000（~40 万 steps）で last100_up = 1.000**。backprop・転置重み・reparameterization なしの SAC が実現可能と確認。ただし持続性未確認・PPO 比約 4 倍遅い | 成立（feasible） |
 | **PPO vs SAC 比較**（§23.12） | 同一タスク・同一の完全 NNN 構成での対決 | PPO が全面で優位（到達 ~9 万 vs ~40 万 steps）。理由は SAC の効率の源泉 reparameterization が backprop フリー制約で禁じられるため。**NNN では PPO 系が構造的に有利**が主結論 | 結論 |
+| **SAC 再訪 v6/v6.1（内部ノイズ＋実測分散＋α 自動＋温度レギュレータ）**（§25.8） | PPO を勝たせた §25 の全部品を SAC v5 に統合し、公平条件（エントロピー調整あり）で壁なし swing-up を再検証。4 アーム（fixa/auto/regfixa/regauto） | best 0.517/0.173/0.163/0.347 と全アームで PPO（1.000）に遠く及ばず。**新現象：SAC 更新下で内部温度が暴走**（0.35→0.9、α では制御不能＝価格は物理ハンドルでない）。**物理レギュレータ ρ_T は温度制御に成功**（0.32–0.37 維持、Stage 3 の setpoint 形）が性能は回復せず。PPO の勝因（実測分散）は信頼領域機構の中で効くと確定し、§23.12.3 の指針を公平条件で再確認 | 結論（PPO 優位再確認） |
 
 **横断的な実装知見**（表の複数行に共通）: (1) forward-mirror 系は **SGD が堅く Adam は不安定**（§20.13/§21.3）。(2) **観測正規化が必須**（§20.13）。(3) mirror は**永続 EMA ＋ KP 追跡**が正しい設計で、per-step 単発推定は RL では律速になる（§23.9）。(4) NNN を ratio ベース RL に載せる際は「**アンサンブル平均 μ が確率的**」であることの統計的会計（周辺分散・ノイズ不感帯・KL ノイズ床）が本質的な移植作業（§23.10 処方 (i)–(v)、SAC でも再利用）。
 
@@ -1902,7 +1903,7 @@ $$\Delta(\text{場座標})\propto A_t\cdot\frac{(a-\mu)^2-\sigma_a^2}{\sigma_a^2
 
 ### 25.5 Stage 1 実施結果（2026-08-02、v1–v2）
 
-実装：`tmp/rl/policy_cont.py`（`noise_mode="internal"`・絶対フロア＋不足分ディザ）、`tmp/rl/ppo.py`（`internal_noise`・`temp_fields` の per-step ゲート適用〔rollout・epoch 再 forward・評価〕・物理分散による score/比/KL 会計）、ドライバ `tmp/rl_itemp_swingup.py`。タスクは §23.13 の壁なし swing-up（終了壁・生存ボーナス・厳格評価）。アームは **gated**（hot σ×1 / cold σ×0.3 を cosθ ゲートでブレンド）と **const**（温度一定、内部化のみの ablation）、各 300 updates・seed 0。
+実装：`tmp/rl/policy_cont.py`（`noise_mode="internal"`・絶対フロア＋不足分ディザ）、`tmp/rl/ppo.py`（`internal_noise`・`temp_fields` の per-step ゲート適用〔rollout・epoch 再 forward・評価〕・物理分散による score/比/KL 会計）、ドライバ `tmp/rl_ppo_itemp_swingup.py`。タスクは §23.13 の壁なし swing-up（終了壁・生存ボーナス・厳格評価）。アームは **gated**（hot σ×1 / cold σ×0.3 を cosθ ゲートでブレンド）と **const**（温度一定、内部化のみの ablation）、各 300 updates・seed 0。
 
 - **v1 = 負の結果（§25.3(a) の訂正の由来）**。相対フロアのみでは spread の小さい状態で score が発散（KL 1.46・clip 0.52）し学習停滞。**絶対温度フロア**（std 0.1）＋実行行動への不足分ディザで解決（v2 は KL 0.02–0.08 で全区間安定）。
 - **v2 = 機構は成立**。σ_e を完全撤廃した内部ノイズ PPO が壁回避（upd 100 で壁死 ~0）から振り上げまで学習。**探索温度が測定可能な物理量になった**（batch の $\sqrt{\overline{\mathrm{var}}}$ を毎 update 記録）。
@@ -1929,7 +1930,92 @@ $$\Delta(\text{場座標})\propto A_t\cdot\frac{(a-\mu)^2-\sigma_a^2}{\sigma_a^2
 
 1. **内部化は「機構として閉じた」だけでなく「性能で外付けを上回った」**（tail 平均 1.00 vs 0.52）。§25.1 の理論的動機（自然統合）が実利で裏づけられた。
 2. **予想の逆転：勝ったのは文脈ゲートでなく一定温度**。§23.13 では「頂点近傍の低ノイズ化が精密ゲインに必要」と仮説したが、実際には**頂点でも σ_out=0.35 のノイズを浴びながら訓練した方策の方が頑健な保持を獲得**した（ノイズ下訓練＝ロバスト化。greedy 実行時はノイズが消えるので保持は容易になる）。cold ゲートはむしろ頂点での頑健化訓練を奪い 0.530 に留まった。「精密さは低温訓練から」ではなく「頑健さは高温訓練から」が正しい描像だった。
-3. **帰属の確定（対照実験・2026-08-02）**：外付け σ_e=0.35 一定（カリキュラム同一・他条件同一）の対照は **best 0.370・late-half 0.286** に留まった。整理すると、外付けアニール 0.647 / 外付け一定 0.370 / **内部一定 1.000**。したがって勝因は「温度一定スケジュール」では**なく**（それ単独ではむしろ悪化）、**内部ノイズ源そのもの**である。候補となる下位機構は (i) score・比の正規化が per-state の実測分散で行われる（状態依存の実効温度）、(ii) 実行行動の偏差に body アンサンブル由来の**構造化成分**（ネットワークが実際に表現しうる行動方向への探索、parameter-space noise 的性質、§18-E）が含まれる、(iii) σ_out がアンサンブル各サンプルに乗るため μ 推定自体が揺らぎ、暗黙の平滑化・データ拡張として働く、の 3 つで、どれが支配的かの分解は未実施（残課題）。
+3. **帰属の確定（対照実験・2026-08-02）**：外付け σ_e=0.35 一定（カリキュラム同一・他条件同一）の対照は **best 0.370・late-half 0.286** に留まった。整理すると、外付けアニール 0.647 / 外付け一定 0.370 / **内部一定 1.000**。したがって勝因は「温度一定スケジュール」では**なく**（それ単独ではむしろ悪化）、内部ノイズ設計にある。**下位機構の分解（同日実施）**：(A) score・比・KL の分散を定数 0.37² に固定し実行はそのまま実サンプルとした **outfixv は 0.570 に劣化**、(B) 実行を「同じ per-state 実測分散の Gaussian ドロー」に置換し会計はそのままの **outgauss は 1.000 を維持**。すなわち**決定的な機構は (i) per-state 実測分散による統計会計**（状態適応的な実効温度・信頼領域）であり、(ii) 実サンプル実行の構造化成分は必須でない（(iii) μ 揺らぎは両勝者に共通で単独分離は未実施）。**核心の言い換え：NNN のアンサンブルは「状態ごとの分散計」であり、その実測分散で score・比・KL を正規化することが勝因**。外付け σ_e 設計はこの測定値を捨てていた。「μ の確率性の会計」（§23.10）の系譜の最終形である。
 4. **多 seed 再現（2026-08-02 追記）**：outconst を seed 1・2 で再現実行した。best last100_up は **seed 0: 1.000（連続 2 ckpt、12/12 検証済み）／seed 1: 0.593／seed 2: 1.000（4 ckpt で 1.000、late-half 0.924）**。3 seed 中 2 つが完全達成で、最弱 seed 1 でも外付け一定対照（0.370）を大きく上回り、終盤上昇傾向。**内部ノイズの優位は seed を跨いで再現する**（完全達成は 2/3。全 seed 保証にはまだ届かず、seed 1 型の遅い獲得の解析は残課題）。
 
 **成果物**：`tmp/out/swingup_itemp_outconst_s0.pt`（勝者 checkpoint）、獲得過程アニメ `tmp/out/rl_itemp_demo.gif`、actor/critic ラスター動画 `tmp/out/rl_itemp_raster.gif`、学習曲線 `tmp/out/itemp_outconst_curves.png`。
+
+### 25.7 計画の改訂（2026-08-02）：Stage 2 の縮小・Stage 3 の SAC への統合
+
+§25.6 の分解結果を受けて、§25.4 の段階計画を次のとおり改訂する。
+
+- **Stage 2（ゲートの学習）は動機が低下したため縮小・保留**。理由：(i) 一定温度が文脈ゲートに勝った（cold 化はロバスト化訓練を奪う、§25.6 知見 2）、(ii) §23.3 の前例（場の分化はタスクが必要とするときのみ創発）から、学習ゲートは定数解に収束する見込みが高い。温度の文脈依存性が genuinely 必要なタスク（例：精密操作と大域探索が同一エピソードで交替する課題）が現れた時点で再訪する。
+- **Stage 3（温度レベルの学習）は SAC の α 自動調整として実現するのが最も自然**。max-entropy 目的の温度パラメータ α の自動調整は「探索温度の報酬学習」そのものであり、§25 でエントロピー＝実測可能な物理量（per-state の実測分散）になったため、§23.11 で「σ_e 固定ゆえ無意味」だった α 調整が初めて意味を持つ。すなわち **SAC 再訪が Stage 3 の実行形態**である。
+- **次段 = SAC 再訪**。§23.11 v5（replay 行動係留 + noise-deadband 比）を土台に、(i) 行動サンプリングを内部ノイズ化（σ_out 場）、(ii) score・重要度比・soft-Q 目標の log π 項をすべて per-state 実測分散で計算（replay に収集時の μ と実測 var を保存）、(iii) α 自動調整（目標エントロピーに対する標準の dual ascent）を導入する。§23.12 の比較で SAC が負けた副次的要因 (b)「entropy 自動調整の不在」がここで解消されるため、PPO との再比較は「backprop フリー制約下での構造的相性」の測定をより公平な条件で更新することになる。
+
+---
+
+### 25.8 SAC 再訪の実施結果（2026-08-02〜03）＝ 温度暴走の発見と物理レギュレータ、ただし PPO 優位は覆らず
+
+§25.7 の計画どおり、SAC v5（§23.11：replay 係留＋deadband 比）に (i) 内部ノイズ（σ_out=0.35）、(ii) 全 logπ・score・比の per-state 実測分散化（replay に収集時 μ・σ_μ・var を保存）、(iii) α 自動調整（実測エントロピーへの dual ascent）を統合した **SAC v6** を、NNN-PPO 決定版と同じ壁なし swing-up（§23.13 env）で検証した。実装 `tmp/rl/sac.py`（`internal_noise`/`alpha_auto`/`temp_reg`）、ドライバ `tmp/rl_sac_itemp_swingup.py`、各アーム 600 episodes（≈24 万 env steps）・seed 0。
+
+**結果（厳格評価 best last100_up / late-half）**：
+
+| アーム | best | late-half | 備考 |
+|---|---|---|---|
+| v6 fixa（α=0.1 固定） | 0.517 | 0.127 | epi 300 がピーク、以後温度暴走で劣化 |
+| v6 auto（α 自動） | 0.173 | 0.024 | 終盤 checkpoint は greedy でも壁死 |
+| v6.1 regfixa（＋温度レギュレータ） | 0.163 | 0.108 | 温度は 0.32–0.37 に制御成功 |
+| v6.1 regauto | 0.347 | 0.216 | 終盤上昇傾向はあるが低水準 |
+| （参照）NNN-PPO 決定版 §26 | **1.000** | 1.000 | 同タスク・同程度の env steps |
+
+**知見**：
+
+1. **内部温度の暴走（新現象）**。SAC の更新下では実測温度が 0.35→0.9 へ単調成長し（actor 更新で重みが育ち ensemble spread が増える）、収集が壁死で崩壊する。PPO では温度が自然に ≤0.3 に収まっており（KL 制約が重み成長を抑えるためと推測）、この現象は SAC で初めて顕在化した。**温度が創発量であることの代償**であり、内部化の設計に「温度の閉ループ制御」が原理的に必要であることを示す。
+2. **α は温度を制御できない**。α 自動調整は符号どおり動作した（実測エントロピー＞目標 → α→下限）が、**α はエントロピーの「価格」であって物理的ハンドルではない**。標準 SAC では σ_θ が方策パラメータなので価格が分散を動かすが、本設計の分散は重みからの創発量であり、価格をゼロにしても下がらない。
+3. **物理レギュレータは機能する（Stage 3 の setpoint 形）**。大域ダイヤル ρ_T（body 場 × σ_out を同時スケール）を実測温度の目標 0.35 への log 比例制御で回すと、**温度は全区間 0.32–0.37 に制御された**（v6.1）。「温度制御は価格でなく場のダイヤルで行う」という §25 の主張が機構として動いた。ただし性能は回復せず（regfixa 0.163）、温度安定は必要条件であって十分条件ではない。
+4. **PPO 優位（§23.12）は公平条件でも覆らない**。エントロピー調整の不在（§23.12.2(b)）を解消し、PPO を勝たせた実測分散会計を注入しても、SAC は 0.5 未満に留まる。**PPO の勝因（per-state 分散）は ratio/clip/KL という信頼領域機構の中で効く**ものであり、SAC の律速は依然として score-function Q 勾配の SNR（§23.11 v3/v4 の診断）にある、というのが整合的な解釈。§23.12.3 のアルゴリズム選択指針（backprop フリー制約下では PPO 系が構造的に有利）は、より公平な条件で再確認された。
+5. 残り札：訓練予算の延長（SAC v5 は簡単なタスクでも 40 万 steps を要した）、n-step 目標、報酬駆動の温度目標（setpoint の一般化）。ただし §23.12 と同様、これらは可能性検証を超えた最適化の領域とし、本再訪はここで一区切りとする。
+
+**成果物**：`tmp/out/swingup_sacit_{fixa,auto,regfixa,regauto}_s0.pt`・`sacit_*_curves.png`（温度・α・ρ_T の軌跡を含む）。
+
+---
+
+## 26. NNN-PPO 決定版アルゴリズム（2026-08-02 整理）
+
+§20 から §25 までの全反復を経て確定した、**最新・正式版の NNN-PPO** の仕様。実装は `tmp/rl/policy_cont.py`（`noise_mode="internal"`）・`tmp/rl/critic.py`（`NNNCritic`）・`tmp/rl/credit.py`（`MirrorEMA`）・`tmp/rl/ppo.py`（`train_ppo_nnn(internal_noise=True, temp_out=(σ_out, σ_out))`）。壁なし swing-up での検証は §25.6（3 seed 中 2 で完全達成）。
+
+### 26.1 構成要素
+
+**方策（actor）**：
+- NNN body：`SimpleNNNSample`、構造 [obs, 128, 128]、per-unit ノイズ σ=0.6、crossing 幅 h=0.15、内部サンプル数 T=64。
+- 線形 readout ＋ **readout ノイズ場** $o^{(m)} \leftarrow o^{(m)} + \sigma_{\rm out}\,\xi^{(m)}$（σ_out = 0.35 一定。温度＝場の成分）。
+- 方策平均 $\mu(s)$ = クリーン readout のアンサンブル平均。
+- **per-state 分散（本質）**：$\mathrm{var}_t(s) = \max\!\big(\mathrm{Var}_m(o^{(m)})\,(1+1/T),\ \mathrm{var}_{\min}\big)$、絶対フロア var_min = 0.01（std 0.1）。
+- 実行行動：実サンプル $a=o^{(m^*)}$（フロア未満では不足分ディザ）。※分解実験（§25.6-3）より $a\sim\mathcal N(\mu,\mathrm{var}_t)$ でも等価に機能する。決定版は NNN 的に自然な実サンプル実行を正とする。
+- greedy 実行：$a=\mu$。
+
+**価値（critic）**：独立の NNN（[obs, 64, 64]、同 σ/h/T）。線形 value readout のアンサンブル平均を $V$ とし、標準化 GAE リターンへの回帰誤差を top-level score として cov_jac で更新（バッチごとに複数エポック）。
+
+**credit（両ネット共通・backprop ゼロ）**：cov_jac forward-mirror 再帰（`cov_weight` mirror × KDE crossing slope）。mirror は**永続 EMA（β=0.1）＋ Kolen–Pollack 追跡**（§23.9。per-step 単発推定は不可）。転置重みはどこにも使わない。
+
+### 26.2 更新則（1 update）
+
+1. **収集**：3 エピソード × horizon 400（壁死で短縮時は総 step 数が揃うまで追加収集）。各 step で $(s, a, \mu_{\rm old}, \mathrm{var}_t, \sigma_\mu)$ を保存。開始角カリキュラム（bottom 50% / 頂点近傍 20% / 一様 30%）。観測は RunningNorm で正規化。
+2. **GAE**：γ=0.99、λ=0.95。advantage はバッチ標準化。リターンは running 標準化して critic 目標に。
+3. **actor（最大 4 エポック、KL 早期停止）**：各サンプルで再 forward して $\mu_{\rm new}$ を取得し、
+   - 比 $r=\exp[(-(a-\mu_{\rm new})^2+(a-\mu_{\rm old})^2)/(2\,\mathrm{var}_t)]$（**収集時の実測 var_t を使用**）
+   - **noise-deadband clip**：閾値 $\epsilon_t=\epsilon+2\sigma_{\log r}$（$\sigma_{\log r}=\sigma_\mu|a-\mu_{\rm old}|/\mathrm{var}_t$）。advantage の符号方向に $r$ が $1\pm\epsilon_t$ を超えたサンプルは棄却
+   - 勾配 = $\mathrm{clamp}(r,1\pm\epsilon_t)\cdot A_t\cdot$ cov_jac score $\big((a-\mu_{\rm new})/\mathrm{var}_t\big)$
+   - **KL 早期停止**：$\overline{(\mu_{\rm new}-\mu_{\rm old})^2/(2\,\mathrm{var}_t)} > 0.02$ で残エポック打ち切り
+   - 更新は Adam（lr 0.01）、mirror は更新量を KP 追跡
+4. **critic（4 エポック）**：凍結した標準化リターンへの cov_jac 回帰（lr 0.02）。
+
+### 26.3 系譜（各要素がどの失敗から来たか）
+
+| 要素 | 由来 |
+|---|---|
+| cov_jac + EMA mirror + KP | §20 Step A–B、§23.9（単発 mirror は律速） |
+| 周辺分散・deadband・KL ノイズ床 | §23.10 v1–v3（μ の確率性の会計） |
+| σ_e 下限（→撤廃の動機） | §23.10 v4 / §23.13（壁なし保持の律速） |
+| 実サンプル行動・内部ノイズ化 | §25 Stage 1（§2.1 の原形の復権） |
+| 絶対温度フロア＋ディザ | §25.5 v1 の崩壊（相対フロアは不十分） |
+| readout ノイズ場 σ_out | §25.6（body σ は飽和して温度に効かない） |
+| **per-state 実測分散の統計会計** | §25.6 分解（outfixv 0.570 vs outgauss 1.000 ＝ 勝因の本体） |
+
+### 26.4 NNN 固有部分と標準部分の切り分け
+
+- **NNN 固有**：(i) 勾配供給が forward mirror（転置重み・backprop ゼロ）、(ii) 方策分布が物理的アンサンブル（外付け分布なし）、(iii) 温度がノイズ場の成分（σ_out）、(iv) **アンサンブルが状態ごとの分散計として機能し、その実測値が PPO の全統計（score・比・clip・KL）を正規化する**。標準 PPO には (iv) に相当する測定値が存在しない（決め打ちの σ しかない）点が、本アルゴリズムの実利的優位の源泉である（§25.6-3）。
+- **標準流用**：GAE・advantage 標準化・clipped surrogate・KL 早期停止・Adam・観測/リターン正規化。
+
+---

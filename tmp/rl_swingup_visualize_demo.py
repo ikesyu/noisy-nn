@@ -1,12 +1,33 @@
-"""rl_ppo_nowall_demo -- animate the ACQUISITION of no-stopper swing-up (PPO v4).
+"""rl_swingup_visualize_demo (旧 rl_ppo_nowall_demo) -- animate the ACQUISITION of no-stopper
+swing-up from any swing-up training run (PPO or SAC, external or internal noise).
 
 Left: cart-pole episode (greedy, from bottom) for a ladder of training checkpoints;
 the stoppers at |x| = 4 are drawn in red -- touching one ends the episode.
 Right-top: the training reward curve with a cursor at the current checkpoint.
 Right-bottom: the current episode's cos(theta) trace growing in real time.
 
-    .venv/bin/python tmp/rl_ppo_nowall_demo.py [--run tmp/out/swingup_ppo_nowall_s0.pt]
-Output: tmp/out/rl_ppo_nowall_demo.gif
+NOISE-SOURCE AGNOSTIC: playback is greedy (a = mu), and mu is the clean ensemble mean
+in every noise mode, so checkpoints from the external-sigma_e drivers and the internal-
+temperature drivers replay identically.  Checkpoints that carry a noise FIELD
+(_snapshot's fields/gate/rho_mode -- e.g. outgate sigma fields, SAC v6.1 rho_T fields)
+ARE field-dependent in mu; the field is re-applied per step here, mirroring
+eval_strict / eval_from_bottom.
+
+SAVE-FORMAT REQUIREMENTS (the .pt passed as --run):
+  required  "checkpoints": [(step:int, snapshot:dict)]  -- snapshot from
+            a2c_swingup._snapshot or a2c_nnncritic._snap (build_policy-compatible;
+            fields/gate_k/gate_c/rho_mode optional inside)
+  required  "stats": [{"upd"|"epi": int, "ret_step": float, ...}]  -- training curve
+            (PPO drivers use "upd", SAC drivers use "epi"; both accepted)
+  optional  "evals": [{"upd": int, "mean_cos", "last100_up", "wall_hits", ...}]
+            -- used to pick the checkpoint ladder and annotate; without it the ladder
+            falls back to first/last checkpoints
+  optional  "wall_penalty", "x_barrier" -- terminal-wall env shaping for playback
+All current drivers (rl_ppo_external_swingup, rl_ppo_itemp_swingup,
+rl_sac_itemp_swingup) write this format.
+
+    .venv/bin/python tmp/rl_swingup_visualize_demo.py [--run tmp/out/swingup_itemp_outconst_s0.pt]
+Output: tmp/out/rl_swingup_demo.gif (override with --out)
 """
 from __future__ import annotations
 
@@ -20,14 +41,16 @@ import torch
 
 sys.path.append(str(Path(__file__).resolve().parent))
 from rl.envs_swingup import CartPoleSwingUp
-from rl.a2c_swingup import build_policy
+from rl.a2c_swingup import build_policy, _set_field
 
 OUT = Path(__file__).resolve().parent / "out"
 X_THR = 4.0
 
 
 def run_episode(state, horizon=500, seed=0, wall_penalty=3.0, x_barrier=0.5):
-    """Greedy from-bottom episode on the terminal-wall env.  Returns trajectory dicts."""
+    """Greedy from-bottom episode on the terminal-wall env.  Returns trajectory dicts.
+    If the checkpoint carries a noise field, it is re-applied per step (mu depends on
+    it); field-less checkpoints run with the network defaults."""
     policy, mean, std = build_policy(state)
     env = CartPoleSwingUp(horizon=horizon, random_start=False, seed=seed,
                           force_mag=state["force_mag"], x_threshold=X_THR,
@@ -37,6 +60,10 @@ def run_episode(state, horizon=500, seed=0, wall_penalty=3.0, x_barrier=0.5):
     traj = []
     died = False
     for _ in range(horizon):
+        if policy._opt_fields is not None:
+            _set_field(policy, policy._opt_fields, float(obs[2]),
+                       policy._gate_k, policy._gate_c,
+                       policy._rho_mode, policy._sigma0, policy._h0)
         on = torch.clamp((torch.tensor(obs, dtype=torch.float32) - mean) / std, -5, 5)
         step = policy.rollout_step(on.unsqueeze(0), greedy=True)
         obs, r, te, tr, info = env.step(float(step.action.item()))
@@ -75,12 +102,12 @@ def pick_ladder(cks, evals):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", default=str(OUT / "swingup_ppo_nowall_s0.pt"))
+    ap.add_argument("--run", default=str(OUT / "swingup_itemp_outconst_s0.pt"))
     ap.add_argument("--horizon", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--stride", type=int, default=3)
-    ap.add_argument("--out", default="rl_ppo_nowall_demo.gif")
+    ap.add_argument("--out", default="rl_swingup_demo.gif")
     ap.add_argument("--torch-seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -142,7 +169,7 @@ def main():
                     fontsize=13, family="monospace")
 
     # training-curve panel (cursor moves with the ladder)
-    upds = [s["upd"] for s in stats]
+    upds = [s.get("upd", s.get("epi")) for s in stats]   # PPO: "upd" / SAC: "epi"
     rets = [s["ret_step"] for s in stats]
     axr.plot(upds, rets, color="C0", lw=1.2)
     axr.set_xlabel("training update")

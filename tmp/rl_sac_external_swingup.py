@@ -1,10 +1,10 @@
-"""rl_sac_swingup -- feasibility test: SAC-style off-policy NNN actor-critic (§23.11).
+"""rl_sac_external_swingup (旧 rl_sac_swingup) -- feasibility test: SAC-style off-policy NNN actor-critic (§23.11).
 
 Does the fully-NNN system (cov_jac actor + twin NNN Q-critics, EMA mirrors everywhere,
 no backprop) learn swing-up + balance under an OFF-POLICY, replay-based, max-entropy
 regime?  Applies the §23.10 prescriptions (i)-(v); see rl/sac.py for the design.
 
-    .venv/bin/python tmp/rl_sac_swingup.py [--episodes 300] [--seed 0]
+    .venv/bin/python tmp/rl_sac_external_swingup.py [--episodes 300] [--seed 0]
 Output: tmp/out/swingup_sac_s0.pt, eval table on stdout.
 """
 from __future__ import annotations
@@ -35,11 +35,14 @@ def main():
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
 
-    policy, qs, norm, cks, hist = train_sac_nnn(
+    policy, qs, norm, cks, hist, _stats = train_sac_nnn(
         seed=args.seed, episodes=args.episodes, horizon=args.horizon,
         rounds=args.rounds, alpha=args.alpha, lr_actor=args.lr_actor,
         actor_mode=args.actor_mode, verbose=True)
-    torch.save({"checkpoints": cks, "hist": hist, "seed": args.seed},
+    torch.save({"checkpoints": cks, "hist": hist, "stats": _stats, "seed": args.seed,
+                "q1_net": {k: v.detach().clone() for k, v in qs[0].net.state_dict().items()},
+                "q2_net": {k: v.detach().clone() for k, v in qs[1].net.state_dict().items()},
+                "q_hidden": qs[0].hidden, "q_t": qs[0].t},
                OUT / f"swingup_sac_s{args.seed}.pt")
 
     print("=== eval swing-up from BOTTOM (greedy, horizon 500) ===")

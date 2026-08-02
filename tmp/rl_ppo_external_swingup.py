@@ -1,4 +1,4 @@
-"""rl_ppo_nowall -- PPO v4 (idea_rl.md §23.10) on the NO-STOPPER swing-up task.
+"""rl_ppo_external_swingup (旧 rl_ppo_nowall) -- PPO v4 (idea_rl.md §23.10) on the NO-STOPPER swing-up task.
 
 The historical swing-up env has physical stoppers at |x| = x_threshold, and the learned
 PPO v4 policy exploits them (measured: 64-88 wall-contact steps per greedy episode).
@@ -10,7 +10,7 @@ Everything else is canonical PPO v4: fully-NNN actor-critic (cov_jac actor + lea
 critic, both persistent EMA mirrors + KP), noise-deadband clip, KL early stop,
 sigma_e annealed 0.4 -> 0.2.
 
-    .venv/bin/python tmp/rl_ppo_nowall.py [--updates 300] [--seed 0]
+    .venv/bin/python tmp/rl_ppo_external_swingup.py [--updates 300] [--seed 0]
 Output: tmp/out/swingup_ppo_nowall_s{seed}.pt  (checkpoints + critic + stats)
         tmp/out/ppo_nowall_curves.png          (training curves + eval summary)
 """
