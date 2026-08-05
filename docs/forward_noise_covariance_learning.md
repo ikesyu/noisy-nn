@@ -80,6 +80,15 @@ below: (i) whether a unit participates must be read off the gauge-invariant **cr
 value of `sigma_k` (idea_core.md §3.3, §4.3); (ii) the `sigma`-gradient estimator carries a
 structural bias specific to this regime (§8.5).
 
+> [new idea — two roles of "covariance" (from idea_core.md §2.7). This document learns from the
+> **output** covariance `Cov_T(z_k, z_i)` (the weight mirror). idea_core.md §2.7.2 exposes a dual:
+> the **input-noise** covariance `Sigma` is the *metric* of each threshold hyperplane — the crossing
+> argument generalises to the Mahalanobis distance `s = (d - h) / sqrt(w^T Sigma w)`. So an
+> anisotropic noise field does not merely perturb credit; it **reshapes the activation** by rotating
+> and scaling the metric. Open question: could the same forward covariance we already estimate be fed
+> back to *set* `Sigma` (metric = shaped by the data's own second moments), unifying covariance credit
+> and covariance-as-metric? cf. `idea_reservoir.md` §14 covariance modulation.]
+
 ## 4. Proposed algorithm
 
 For each input `x` (batched over `N` points) and target `t`, run `M` stochastic
