@@ -259,6 +259,11 @@ def sweep_pair(net, flds, obs, obs_np, alphas, args, a: str, b: str) -> dict:
     steps = np.array([rms_distance(ys[i + 1], ys[i]) for i in range(len(lams) - 1)])
     total = float(steps.sum())
     jitter = float(np.mean([rms_distance(y, y2) for y, y2 in zip(ys, ys2)]))
+    # Endpoint distance is the jitter-robust scale: it is large, so the noise that
+    # inflates every consecutive step adds negligibly in quadrature here.  Consecutive
+    # steps cannot be used for this -- at low T they are almost entirely jitter, which
+    # would make the dial look FINER the noisier it gets.
+    endpoint_dist = rms_distance(ys[-1], ys[0])
 
     return {
         "lams": lams, "err_interp": err_interp, "err_a": err_a, "err_b": err_b,
@@ -271,6 +276,7 @@ def sweep_pair(net, flds, obs, obs_np, alphas, args, a: str, b: str) -> dict:
                        if rms_distance(ys[-1], ys[0]) > 0 else np.inf),
         "step_over_jitter": (float(steps.mean() / jitter) if jitter > 0 else np.inf),
         "jitter": jitter,
+        "resolution": (float(jitter / endpoint_dist) if endpoint_dist > 0 else np.inf),
         "interior_gain": float(np.mean(
             err_interp[1:-1] < err_switch[1:-1])) if len(lams) > 2 else 0.0,
     }
@@ -281,7 +287,7 @@ def sweep_pair(net, flds, obs, obs_np, alphas, args, a: str, b: str) -> dict:
 # ============================================================
 
 SCALARS = ("spearman", "max_step_frac", "path_ratio", "step_over_jitter",
-           "jitter", "interior_gain")
+           "jitter", "interior_gain", "resolution")
 CURVES = ("err_interp", "err_a", "err_b", "err_switch", "lam_hat",
           "err_best_mu", "err_blend", "nu_mean")
 
@@ -350,6 +356,18 @@ def verdict(agg: dict, args) -> tuple[bool, str]:
         f"{err[interior].mean():.4f} mean; at the implied mixture "
         f"{agg['err_best_mu'][interior].mean():.4f}; a pure mixer would score "
         f"{agg['err_blend'][interior].mean():.4f}; endpoint {endpoint:.4f}")
+    # How finely the dial can be read at THIS T: the output travels `endpoint_dist`
+    # across the whole axis while one evaluation is uncertain by `jitter`, so
+    # lambda steps below jitter / endpoint_dist are not resolvable.  This is the
+    # operationally meaningful number -- raising T is a MEASUREMENT choice, but an
+    # agent that acts on one forward pass lives at its training T.
+    resolution = agg["resolution"]
+    if np.isfinite(resolution) and resolution > 0:
+        lines.append(
+            f"    dial resolution at T={args.eval_samples}: delta-lambda below "
+            f"{resolution:.3f} is lost in the single-pass noise, i.e. about "
+            f"{max(1, int(round(1.0 / resolution)))} distinguishable settings "
+            f"across the axis")
     nu = agg["nu_mean"]
     lines.append(
         f"    operating point: mean crossing rate nu = {nu[0]:.4f} / "
