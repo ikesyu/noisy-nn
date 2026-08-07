@@ -28,6 +28,9 @@ Modules:
     tasks    : narma_x, mc_input
     readout  : ridge, standardisation, splits, scores
     metrics  : memory_capacity, task_nrmse
+    moment   : shared harness for the moment-order (threshold/crossing/lambda)
+               activation comparisons of §10.24-10.36/§13.1 (torch; not imported
+               here to keep `import reservoir` numpy-only)
 
 Side branches from the exploration (recurrent crossing reservoir, cov_jac /
 forward-noise variants, functional / super-resolution, output feedback, …) are

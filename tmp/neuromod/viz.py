@@ -9,6 +9,7 @@ ticks, one shared font scale.
 """
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import numpy as np
@@ -109,10 +110,13 @@ def _square_axes(ax, title=None):
 
 
 def draw_loss_panel(ax, history):
-    """Static training-loss curves, one per recruited behaviour."""
-    for state in world.STATES:
-        color = MARKERS[world.STATE_TO_FIELD[state]]["color"]
-        ax.plot(history[state], color=color, lw=1.2, label=world.EPISODE_LABEL[state])
+    """Static training-loss curves: per recruited behaviour, or whatever
+    series the training protocol recorded (e.g. one 'blended' curve)."""
+    for key, series in history.items():
+        color = (MARKERS[world.STATE_TO_FIELD[key]]["color"]
+                 if key in world.STATE_TO_FIELD else "0.3")
+        label = world.EPISODE_LABEL.get(key, key)
+        ax.plot(series, color=color, lw=1.2, label=label)
     ax.set_yscale("log")
     ax.set_title("Training loss (shared weights)")
     ax.set_xlabel("update step")
@@ -171,6 +175,7 @@ def animate(predict, objects, fields, history, alphas, *,
             speed_mode="learned", speed_gain=0.9, hunger_rate=0.006,
             need_rate=0.006, eat_amount=0.6, rest_frames=50,
             threat_gain=1.7, threat_range=0.40, neuromod_smoothing=0.12,
+            refuge_range=0.0, risk_hunger=0.0,
             threat_motion="moving", threat_speed=0.01, seed=0,
             dynamic=False, velocities=None, show_reference=False,
             target_gamma=2.0, velocity_smoothing=0.2, dt=0.04,
@@ -217,8 +222,9 @@ def animate(predict, objects, fields, history, alphas, *,
         velocity_smoothing=velocity_smoothing, dt=dt, hunger_rate=hunger_rate,
         need_rate=need_rate, eat_amount=eat_amount, rest_frames=rest_frames,
         threat_gain=threat_gain, threat_range=threat_range,
-        neuromod_smoothing=neuromod_smoothing, threat_motion=threat_motion,
-        threat_speed=threat_speed, threat_seed=seed)
+        neuromod_smoothing=neuromod_smoothing, refuge_range=refuge_range,
+        risk_hunger=risk_hunger,
+        threat_motion=threat_motion, threat_speed=threat_speed, threat_seed=seed)
 
     def update(frame):
         objs = state["objects"]
@@ -232,6 +238,7 @@ def animate(predict, objects, fields, history, alphas, *,
         field_name, episode_label = rec["field_name"], rec["label"]
         current_alpha = world.blend_alpha(weights, alphas)
         speed_hist.append(speed)
+        del speed_hist[:-300]        # only the last 300 are drawn; endless-safe
         trail = np.array(state["trail"])
         n_left = int(np.sum(state["food_strengths"] > 0.0))
         n_food = state["food_strengths"].shape[0]
@@ -283,12 +290,18 @@ def animate(predict, objects, fields, history, alphas, *,
         return []
 
     fig.tight_layout()
-    anim = FuncAnimation(fig, update, frames=anim_frames, interval=1000 / fps,
-                         blit=False, repeat=True)
-
     if save_path is None:
+        # Live view: run the closed loop FOREVER.  itertools.count() never wraps
+        # the frame index (cycle mode keeps its phase continuous anyway), and
+        # cache_frame_data=False stops matplotlib from accumulating every frame.
+        # `anim_frames` only sets the length of a SAVED animation.
+        anim = FuncAnimation(fig, update, frames=itertools.count(),
+                             interval=1000 / fps, blit=False,
+                             cache_frame_data=False)
         plt.show()
         return anim
+    anim = FuncAnimation(fig, update, frames=anim_frames, interval=1000 / fps,
+                         blit=False, repeat=False)
     path = Path(save_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     anim.save(path, writer=PillowWriter(fps=fps))

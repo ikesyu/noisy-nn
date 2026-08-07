@@ -99,6 +99,99 @@ def train(net, obs: torch.Tensor, targets: dict[str, torch.Tensor],
     return history
 
 
+def train_blended(net, pool_positions: np.ndarray, objects: dict, alphas: dict,
+                  fields: dict, n_hidden: int, steps: int, bs: int = 512,
+                  lr: float = 3e-4, seed: int = 0, gamma: float = 2.0,
+                  wall_margin: float = 0.15, wall_kappa: float = 1.0,
+                  randomize_threats: bool = True, randomize_food: bool = True,
+                  verbose: bool = True):
+    """Train on the RUNTIME distribution instead of the three pure corners.
+
+    The closed loop never runs a pure state: `neuromod_weights` produces a
+    convex blend of a goal field (food or shelter) with the threat field, and
+    the threats WANDER.  Sec7.11 measured that a pure-trained network under
+    blended fields is worse than a naive output mixer, which was tolerable for
+    the near-linear 6D vector code but breaks the sector code (the nonlinear
+    map does not factor across channels): symptoms were "ignores adjacent
+    food", "walks into threats", "sheltering never triggers".  Each step here
+    samples
+
+        a position minibatch  x  a blend w on the runtime manifold
+        (30% pure / 50% goal<->threat edge / 20% Dirichlet interior)
+        x  (optionally) a fresh random threat placement in the wander box
+
+    with the target computed from the same geometry rule.  `randomize_food`
+    additionally drops each food with p=0.2 per step (sensing and target use
+    the same mask): the loop DEPLETES food, and a net that never saw "the food
+    I am standing on is gone" keeps the low deceleration-zone speed it learned
+    there instead of accelerating to the next food (measured: direction fine
+    at cos 0.96, magnitude anchored at 0.41 vs teacher 0.88 -- the post-eating
+    stall).  NOTE for L4: nets trained this way have SEEN mixtures, so they
+    cannot support the zero-shot interpolation claim of sec7.11; that claim
+    rests on pure-trained nets.
+    """
+    from . import world
+    from . import fields as fieldlib
+
+    rng = np.random.default_rng(seed)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    pool_n = pool_positions.shape[0]
+    history = {"blended": []}
+    log_step = max(1, steps // 20)
+
+    for step in range(steps):
+        u = rng.random()
+        if u < 0.3:
+            w = np.zeros(3, np.float32); w[rng.integers(3)] = 1.0
+        elif u < 0.8:
+            w = np.zeros(3, np.float32)
+            g = 0 if rng.random() < 0.5 else 2
+            a = rng.random()
+            w[g] = 1.0 - a; w[1] = a
+        else:
+            w = rng.dirichlet((1.0, 1.0, 1.0)).astype(np.float32)
+
+        objs_step = objects
+        if randomize_threats:
+            tpos = []
+            while len(tpos) < objects["threat"].shape[0]:
+                c = rng.uniform(-world.THREAT_BOUNDS, world.THREAT_BOUNDS, size=2)
+                if all(np.linalg.norm(c - s) >= world.THREAT_KEEPOUT_RADIUS
+                       for s in objects["shelter"]):
+                    tpos.append(c)
+            objs_step = {k: v.copy() for k, v in objects.items()}
+            objs_step["threat"] = np.array(tpos, dtype=np.float32)
+
+        fs = None
+        if randomize_food:
+            fs = (rng.random(objects["food"].shape[0]) > 0.2).astype(np.float32)
+
+        alpha_w = world.blend_alpha(w, alphas)
+        field_w = fieldlib.blend_fields(fields, w, world.CATEGORIES)
+        idx = rng.choice(pool_n, size=bs, replace=False)
+        pos_b = pool_positions[idx]
+        obs_b = torch.tensor(world.encode_observations(pos_b, objs_step,
+                                                       food_strengths=fs),
+                             dtype=torch.float32)
+        tgt_b = torch.tensor(world.make_behavior_targets(
+                    pos_b, objs_step, alpha_w, gamma=gamma,
+                    wall_margin=wall_margin, wall_kappa=wall_kappa,
+                    food_strengths=fs),
+                             dtype=torch.float32)
+
+        optimizer.zero_grad()
+        loss = criterion(evaluate_vector_field(net, obs_b, field_w, n_hidden),
+                         tgt_b)
+        loss.backward()
+        optimizer.step()
+        history["blended"].append(loss.item())
+        if verbose and (step % log_step == 0 or step == steps - 1):
+            print(f"  step {step:6d}   blended={loss.item():.4f}")
+
+    return history
+
+
 def final_losses(net, obs: torch.Tensor, targets: dict[str, torch.Tensor],
                  state_fields: dict[str, torch.Tensor], states,
                  n_hidden: int) -> dict[str, float]:

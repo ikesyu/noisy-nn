@@ -88,6 +88,51 @@ THREAT_BOUNDS = 0.72
 HUNGER_LO = 0.35
 SHELTER_LO = 0.15
 
+# Hunger level at which foraging courage starts to build (risk_hunger gate in
+# neuromod_weights).  Below this the threat urgency is untouched, so the fed
+# agent's avoidance stays legible; full courage is reached at hunger 1.
+RISK_HUNGER_ONSET = 0.6
+
+# ------------------------------------------------------------
+# Sensing configuration (Stage 1, docs/idea_neuromod.md)
+# ------------------------------------------------------------
+# "vector": the original 6D nearest-object relative vectors.  Kept as the
+#           module default so existing scripts reproduce their recorded runs.
+# "sector": K angular sectors x 4 channels (food, threat, shelter, wall).
+#           All behaviours read the SAME angular substrate, which makes the
+#           one-network multiplexing claim structural instead of accidental,
+#           and walls become perceivable instead of being a teacher-side hack.
+SENSING = "vector"
+N_SECTORS = 8
+SECTOR_CENTERS = 2.0 * np.pi * np.arange(N_SECTORS) / N_SECTORS
+SECTOR_DIRS = np.stack([np.cos(SECTOR_CENTERS), np.sin(SECTOR_CENTERS)],
+                       axis=1).astype(np.float32)          # [K, 2]
+SENSE_LAMBDA = 2.0      # object-channel distance constant  g(d) = exp(-d/lambda);
+                        # 1.0 measured too short-sighted (far food ~0.14 leaves the
+                        # return drive after a flee too weak; wall-band dwell rises)
+WALL_LAMBDA = 0.25      # wall-channel constant on the ray distance to the box
+SENSE_CHANNELS = ("food", "threat", "shelter", "wall")
+
+
+def set_sensing(mode: str) -> None:
+    if mode not in ("vector", "sector"):
+        raise ValueError(f"unknown sensing mode {mode!r}")
+    global SENSING
+    SENSING = mode
+
+
+def set_sectors(k: int) -> None:
+    """Change the angular resolution K (rebuilds the derived sector tables)."""
+    global N_SECTORS, SECTOR_CENTERS, SECTOR_DIRS
+    N_SECTORS = int(k)
+    SECTOR_CENTERS = 2.0 * np.pi * np.arange(N_SECTORS) / N_SECTORS
+    SECTOR_DIRS = np.stack([np.cos(SECTOR_CENTERS), np.sin(SECTOR_CENTERS)],
+                           axis=1).astype(np.float32)
+
+
+def obs_dim() -> int:
+    return 6 if SENSING == "vector" else N_SECTORS * len(SENSE_CHANNELS)
+
 
 def alpha_states(mix: float = None) -> dict[str, np.ndarray]:
     """Drive weights per state, optionally with the off-drives raised to `mix`.
@@ -217,25 +262,140 @@ def nearest_relative_vector(position: np.ndarray, object_positions: np.ndarray,
     return rel[j].astype(np.float32)
 
 
+def _sector_tuning(theta: np.ndarray) -> np.ndarray:
+    """Raised-cosine angular tuning per sector, [K] per angle -> [K, n].
+
+    w_k(theta) = cos^2(K (theta - phi_k) / 4) on |theta - phi_k| <= 2pi/K,
+    else 0.  Adjacent sectors overlap at half height and the K curves sum to 1
+    (partition of unity), so the code is smooth as an object sweeps the sheet.
+    """
+    d = (theta[None, :] - SECTOR_CENTERS[:, None] + np.pi) % (2 * np.pi) - np.pi
+    w = np.cos(N_SECTORS * d / 4.0) ** 2
+    return np.where(np.abs(d) <= 2.0 * np.pi / N_SECTORS, w, 0.0)
+
+
+def _sector_channel(position: np.ndarray, object_positions: np.ndarray,
+                    available: np.ndarray = None) -> np.ndarray:
+    """[K] sector code for one object category: s_k = max_j w_k(theta_j) g(d_j)."""
+    if object_positions.shape[0] == 0:
+        return np.zeros(N_SECTORS, dtype=np.float32)
+    rel = object_positions - position[None, :]
+    if available is not None:
+        rel = rel[np.asarray(available) > 0.0]
+        if rel.shape[0] == 0:
+            return np.zeros(N_SECTORS, dtype=np.float32)
+    d = np.linalg.norm(rel, axis=1)
+    g = np.exp(-d / SENSE_LAMBDA)
+    w = _sector_tuning(np.arctan2(rel[:, 1], rel[:, 0]))       # [K, n]
+    return (w * g[None, :]).max(axis=1).astype(np.float32)
+
+
+def _wall_channel(position: np.ndarray) -> np.ndarray:
+    """[K] wall proximity: s_k = exp(-t_k / lambda_w), t_k = ray distance to
+    the [-1, 1]^2 boundary along the sector centre direction."""
+    out = np.zeros(N_SECTORS, dtype=np.float32)
+    for k in range(N_SECTORS):
+        u = SECTOR_DIRS[k]
+        t = np.inf
+        for a in range(2):
+            if abs(u[a]) > 1e-9:
+                t = min(t, (np.sign(u[a]) * 1.0 - position[a]) / u[a])
+        out[k] = np.exp(-max(t, 0.0) / WALL_LAMBDA)
+    return out
+
+
 def encode_observation(position: np.ndarray, objects: dict[str, np.ndarray],
                        food_strengths: np.ndarray = None) -> np.ndarray:
-    """6D nearest-object sensory input for one agent position.
+    """Sensory input for one agent position, in the module's SENSING mode.
 
     Perception is pure geometry: internal drives are NOT mixed in here, they only
     gate WHICH noise fields are recruited (see `neuromod_weights`).
+
+    "vector" (original): 6D raw relative vector to the nearest available object
+    of each category.  "sector" (Stage 1): K angular sectors x (food, threat,
+    shelter, wall) bounded proximities -- every behaviour reads the same
+    angular substrate, and walls are perceivable.
     """
+    if SENSING == "vector":
+        return np.concatenate([
+            nearest_relative_vector(position, objects["food"], available=food_strengths),
+            nearest_relative_vector(position, objects["threat"]),
+            nearest_relative_vector(position, objects["shelter"]),
+        ]).astype(np.float32)
     return np.concatenate([
-        nearest_relative_vector(position, objects["food"], available=food_strengths),
-        nearest_relative_vector(position, objects["threat"]),
-        nearest_relative_vector(position, objects["shelter"]),
+        _sector_channel(position, objects["food"], available=food_strengths),
+        _sector_channel(position, objects["threat"]),
+        _sector_channel(position, objects["shelter"]),
+        _wall_channel(position),
     ]).astype(np.float32)
+
+
+def _batch_nearest_rel(positions: np.ndarray, object_positions: np.ndarray,
+                       available: np.ndarray = None) -> np.ndarray:
+    """Vectorised nearest_relative_vector: [N, 2] x [M, 2] -> [N, 2]."""
+    n = positions.shape[0]
+    if object_positions.shape[0] == 0:
+        return np.zeros((n, 2), dtype=np.float32)
+    rel = object_positions[None, :, :] - positions[:, None, :]      # [N, M, 2]
+    dist = np.linalg.norm(rel, axis=2)                              # [N, M]
+    if available is not None:
+        dist = np.where(np.asarray(available)[None, :] > 0.0, dist, np.inf)
+    j = dist.argmin(axis=1)
+    out = rel[np.arange(n), j]
+    out[~np.isfinite(dist[np.arange(n), j])] = 0.0
+    return out.astype(np.float32)
+
+
+def _batch_sector_channel(positions: np.ndarray, object_positions: np.ndarray,
+                          available: np.ndarray = None) -> np.ndarray:
+    """Vectorised sector code: [N, 2] x [M, 2] -> [N, K]."""
+    n = positions.shape[0]
+    if object_positions.shape[0] == 0:
+        return np.zeros((n, N_SECTORS), dtype=np.float32)
+    obj = object_positions
+    if available is not None:
+        obj = obj[np.asarray(available) > 0.0]
+        if obj.shape[0] == 0:
+            return np.zeros((n, N_SECTORS), dtype=np.float32)
+    rel = obj[None, :, :] - positions[:, None, :]                   # [N, M, 2]
+    d = np.linalg.norm(rel, axis=2)                                 # [N, M]
+    g = np.exp(-d / SENSE_LAMBDA)
+    theta = np.arctan2(rel[..., 1], rel[..., 0])                    # [N, M]
+    dth = (theta[:, :, None] - SECTOR_CENTERS[None, None, :]
+           + np.pi) % (2 * np.pi) - np.pi                           # [N, M, K]
+    w = np.where(np.abs(dth) <= 2.0 * np.pi / N_SECTORS,
+                 np.cos(N_SECTORS * dth / 4.0) ** 2, 0.0)
+    return (w * g[:, :, None]).max(axis=1).astype(np.float32)       # [N, K]
+
+
+def _batch_wall_channel(positions: np.ndarray) -> np.ndarray:
+    """Vectorised wall code: [N, 2] -> [N, K]."""
+    n = positions.shape[0]
+    t = np.full((n, N_SECTORS), np.inf)
+    for a in range(2):
+        u = SECTOR_DIRS[:, a][None, :]                              # [1, K]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ta = (np.sign(u) * 1.0 - positions[:, a][:, None]) / u  # [N, K]
+        ta = np.where(np.abs(u) > 1e-9, ta, np.inf)
+        t = np.minimum(t, ta)
+    return np.exp(-np.maximum(t, 0.0) / WALL_LAMBDA).astype(np.float32)
 
 
 def encode_observations(positions: np.ndarray, objects: dict[str, np.ndarray],
                         food_strengths: np.ndarray = None) -> np.ndarray:
-    """Batch encoder: [N, 2] positions -> [N, 6] nearest-object observations."""
-    return np.stack([encode_observation(p, objects, food_strengths)
-                     for p in positions], axis=0)
+    """Batch encoder: [N, 2] positions -> [N, obs_dim()] (vectorised)."""
+    if SENSING == "vector":
+        return np.concatenate([
+            _batch_nearest_rel(positions, objects["food"], available=food_strengths),
+            _batch_nearest_rel(positions, objects["threat"]),
+            _batch_nearest_rel(positions, objects["shelter"]),
+        ], axis=1).astype(np.float32)
+    return np.concatenate([
+        _batch_sector_channel(positions, objects["food"], available=food_strengths),
+        _batch_sector_channel(positions, objects["threat"]),
+        _batch_sector_channel(positions, objects["shelter"]),
+        _batch_wall_channel(positions),
+    ], axis=1).astype(np.float32)
 
 
 def make_mixed_behavior_targets(observations: np.ndarray, alpha: np.ndarray,
@@ -249,6 +409,38 @@ def make_mixed_behavior_targets(observations: np.ndarray, alpha: np.ndarray,
     z = alpha[0] * r_food - alpha[1] * r_threat + alpha[2] * r_shelter
     norm = np.linalg.norm(z, axis=1, keepdims=True)
     return (np.tanh(gamma * norm) * z / (norm + eps)).astype(np.float32)
+
+
+def make_behavior_targets(positions: np.ndarray, objects: dict[str, np.ndarray],
+                          alpha: np.ndarray, gamma: float = 2.0,
+                          wall_margin: float = 0.15, wall_kappa: float = 1.0,
+                          food_strengths: np.ndarray = None,
+                          eps: float = 1e-8) -> np.ndarray:
+    """Behaviour targets from GEOMETRY (positions + objects), sensing-agnostic.
+
+    Same rule as `make_mixed_behavior_targets` -- z = a_f r_food - a_t r_threat
+    + a_s r_shelter, v = tanh(gamma ||z||) z/||z|| -- but computed from the
+    agent positions directly, so it defines the teacher for any SENSING mode,
+    plus the wall-consistency term that used to live in the driver: within
+    `wall_margin` of a wall the outward component of v is smoothstep-blended
+    to -wall_kappa times itself (soft reflection).  Pure damping (kappa=0)
+    measured WORSE than no treatment (viscous band); keep kappa near 1.
+    """
+    r = {c: _batch_nearest_rel(
+             positions, objects[c],
+             available=food_strengths if c == "food" else None)
+         for c in CATEGORIES}
+    z = alpha[0] * r["food"] - alpha[1] * r["threat"] + alpha[2] * r["shelter"]
+    norm = np.linalg.norm(z, axis=1, keepdims=True)
+    v = (np.tanh(gamma * norm) * z / (norm + eps)).astype(np.float32)
+    if wall_margin > 0.0:
+        for ax in (0, 1):
+            p, u = positions[:, ax], v[:, ax]
+            d = np.clip((1.0 - np.abs(p)) / wall_margin, 0.0, 1.0)
+            s = d * d * (3.0 - 2.0 * d)                     # smoothstep
+            m = s - (1.0 - s) * wall_kappa                  # 1 inside -> -kappa at wall
+            v[:, ax] = np.where(u * p > 0.0, u * m, u)
+    return v
 
 
 def make_training_grid(grid_side: int) -> np.ndarray:
@@ -310,7 +502,8 @@ def apply_shelter_satisfaction(position: np.ndarray, objects: dict[str, np.ndarr
 def neuromod_weights(position: np.ndarray, objects: dict[str, np.ndarray],
                      hunger: float, shelter_need: float, goal: str,
                      prev_w: np.ndarray, threat_gain: float, threat_range: float,
-                     smoothing: float) -> tuple:
+                     smoothing: float, refuge_range: float = 0.0,
+                     risk_hunger: float = 0.0) -> tuple:
     """Continuous neuromodulatory weights [food, threat, shelter] and updated goal.
 
     Two levels, deliberately simple: a committed food/shelter GOAL (1 bit) that
@@ -318,6 +511,24 @@ def neuromod_weights(position: np.ndarray, objects: dict[str, np.ndarray],
     urgency that continuously cross-fades the threat field over that goal.  The
     whole vector is low-pass filtered, which prevents the chattering a hard rule
     produces and blends the recruited subnetworks like overlapping concentrations.
+
+    `refuge_range > 0` adds a refuge override: while the goal is the shelter,
+    threat urgency is damped by proximity to the nearest shelter, so a
+    shelter-bound agent dashes the last stretch in instead of hovering at the
+    doorstep whenever a wandering threat loiters near the entrance (the flee
+    blend otherwise cancels the weak arrival-side approach drive for hundreds
+    of frames).  Entering the refuge IS the anti-threat response there.  0
+    disables it and preserves the original arbitration.
+
+    `risk_hunger > 0` adds the starvation-predation risk trade-off: while
+    foraging, threat urgency is damped by up to `risk_hunger`, but only once
+    hunger exceeds RISK_HUNGER_ONSET (smoothstep to full courage at hunger 1),
+    so a fed agent's avoidance is untouched and a starving one darts past the
+    threat.  Without this, a threat loitering near the foods (the wander box
+    contains both) blocks foraging indefinitely -- measured at ~80% of all
+    food-less foraging time; a LINEAR hunger gate measured as overshoot (the
+    agent brushes threats even when fed, min distance 0.02).  Because hunger
+    keeps rising while blocked, the block is self-limiting.  0 disables it.
     """
     if goal == "food" and hunger <= HUNGER_LO:
         goal = "shelter"
@@ -333,6 +544,15 @@ def neuromod_weights(position: np.ndarray, objects: dict[str, np.ndarray],
     else:
         g_threat = 0.0
     a = float(np.clip(threat_gain * g_threat, 0.0, 1.0))
+
+    if refuge_range > 0.0 and goal == "shelter" and objects["shelter"].shape[0] > 0:
+        d_shelter = float(np.linalg.norm(objects["shelter"] - position[None, :],
+                                         axis=1).min())
+        a *= 1.0 - float(np.exp(-(d_shelter / refuge_range) ** 2))
+    if risk_hunger > 0.0 and goal == "food":
+        h = float(np.clip((hunger - RISK_HUNGER_ONSET)
+                          / (1.0 - RISK_HUNGER_ONSET), 0.0, 1.0))
+        a *= 1.0 - risk_hunger * h * h * (3.0 - 2.0 * h)
 
     w_target = (1.0 - a) * base + a * np.array([0.0, 1.0, 0.0], dtype=np.float32)
     w = ((1.0 - smoothing) * prev_w + smoothing * w_target).astype(np.float32)
@@ -435,6 +655,10 @@ class LoopParams:
     threat_gain: float = 1.7
     threat_range: float = 0.40
     neuromod_smoothing: float = 0.12
+    refuge_range: float = 0.0    # >0: damp threat urgency near the shelter
+                                 # while shelter-bound (see neuromod_weights)
+    risk_hunger: float = 0.0     # >0: hungrier agents tolerate more threat
+                                 # while foraging (see neuromod_weights)
     threat_motion: str = "moving"
     threat_speed: float = 0.01
     threat_seed: int = 0
@@ -465,7 +689,8 @@ def advance_frame(state: dict, predict, fields, params: LoopParams,
         state["w"], state["goal"], _ = neuromod_weights(
             state["pos"], objs, state["hunger"], state["shelter_need"],
             state["goal"], state["w"], params.threat_gain, params.threat_range,
-            params.neuromod_smoothing)
+            params.neuromod_smoothing, refuge_range=params.refuge_range,
+            risk_hunger=params.risk_hunger)
         weights = state["w"]
     else:
         weights = cyclic_weights(2.0 * np.pi * frame / max(1, n_frames))
