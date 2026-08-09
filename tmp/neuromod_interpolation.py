@@ -75,6 +75,11 @@ from neuromod import fields as F
 from neuromod import protocol as P
 from neuromod import viz, world
 
+# The recorded results of this script were produced with the legacy 6D vector
+# sensing; the module default is now the sector code (the standard benchmark),
+# so pin the old encoding explicitly.
+world.set_sensing("vector")
+
 FIELD_TO_STATE = {v: k for k, v in world.STATE_TO_FIELD.items()}
 
 
