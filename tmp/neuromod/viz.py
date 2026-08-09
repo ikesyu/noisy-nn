@@ -160,7 +160,7 @@ def field_sheet(fields, hidden_dim, save_path=None):
 
     fig, axes = plt.subplots(1, len(fields), figsize=(4.2 * len(fields), 4.0))
     for ax, (key, field) in zip(np.atleast_1d(axes), fields.items()):
-        im = ax.imshow(field.numpy().reshape(side, side), origin="lower",
+        im = ax.imshow(field.cpu().numpy().reshape(side, side), origin="lower",
                        extent=[0, 1, 0, 1], cmap="magma", vmin=0.0, vmax=vmax)
         ax.set_title(f"'{key}' field")
         ax.set_xticks([])
@@ -170,17 +170,20 @@ def field_sheet(fields, hidden_dim, save_path=None):
 
 
 def animate(predict, objects, fields, history, alphas, *,
-            demo_mode="scripted", layout="scripted", anim_frames=360,
-            eat_radius=0.10, shelter_radius=0.08, food_respawn=False,
-            speed_mode="learned", speed_gain=0.9, hunger_rate=0.006,
-            need_rate=0.006, eat_amount=0.6, rest_frames=50,
-            threat_gain=1.7, threat_range=0.40, neuromod_smoothing=0.12,
-            refuge_range=0.0, risk_hunger=0.0,
-            threat_motion="moving", threat_speed=0.01, seed=0,
+            params: world.LoopParams = None,
+            demo_mode="scripted", anim_frames=360,
             dynamic=False, velocities=None, show_reference=False,
-            target_gamma=2.0, velocity_smoothing=0.2, dt=0.04,
-            hidden_dim=64, save_path=None, fps=20):
+            target_gamma=2.0, hidden_dim=64, save_path=None, fps=20):
     """Closed-loop animation of the trained system.
+
+    `params` is THE loop configuration -- one `world.LoopParams`, the same
+    object a headless `world.rollout` would take.  This function used to
+    re-declare every loop knob as a keyword with its own defaults, and those
+    defaults drifted from `LoopParams` (`speed_ref` was missing entirely, so
+    the ANIMATED animal ran ~3x slower than the measured one; `threat_range`,
+    `refuge_range` and `risk_hunger` had stale values).  A single shared
+    dataclass is what guarantees the SR curve describes the animal on screen.
+    None means the standard benchmark settings.
 
     `demo_mode="scripted"` runs the reactive loop: the graded drives produce
     continuous, smoothed weights that BLEND the three fields, and the recruited
@@ -188,10 +191,12 @@ def animate(predict, objects, fields, history, alphas, *,
     the three states instead, which is the continuous-control view.
 
     Panels: world and trajectory, recruited vector field, the current noise field
-    on the unit sheet, and the agent's speed.  The speed panel exists because with
-    `speed_mode="learned"` the network's output magnitude carries the collapse
-    that behaviour-level stochastic resonance is about.
+    on the unit sheet, and the agent's speed.  The speed panel exists because the
+    network's output magnitude carries the collapse that behaviour-level
+    stochastic resonance is about.
     """
+    if params is None:
+        params = world.LoopParams()
     use_headless(save_path)
     plt.rcParams.update(FONT)
 
@@ -201,13 +206,13 @@ def animate(predict, objects, fields, history, alphas, *,
     q_positions = np.stack([qx.ravel(), qy.ravel()], axis=1).astype(np.float32)
     side = int(round(np.sqrt(hidden_dim)))
 
-    state = world.initialize_demo_state(objects, layout)
+    state = world.initialize_demo_state(objects)
     if dynamic and velocities is not None:
         state["vels"] = {k: velocities[k].copy() for k in world.CATEGORIES}
-    threats_move = (demo_mode == "scripted" and threat_motion == "moving")
+    threats_move = (demo_mode == "scripted" and params.threat_motion == "moving")
     if threats_move:
         state["threat_vels"] = world.make_threat_velocities(
-            state["objects"], threat_speed, seed)
+            state["objects"], params.threat_speed, params.threat_seed)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9.6))
     ax_env, ax_quiver = axes[0]
@@ -215,16 +220,6 @@ def animate(predict, objects, fields, history, alphas, *,
 
     vmax = float(max(f.max() for f in fields.values()))
     speed_hist: list[float] = []
-
-    params = world.LoopParams(
-        eat_radius=eat_radius, shelter_radius=shelter_radius,
-        food_respawn=food_respawn, speed_mode=speed_mode, speed_gain=speed_gain,
-        velocity_smoothing=velocity_smoothing, dt=dt, hunger_rate=hunger_rate,
-        need_rate=need_rate, eat_amount=eat_amount, rest_frames=rest_frames,
-        threat_gain=threat_gain, threat_range=threat_range,
-        neuromod_smoothing=neuromod_smoothing, refuge_range=refuge_range,
-        risk_hunger=risk_hunger,
-        threat_motion=threat_motion, threat_speed=threat_speed, threat_seed=seed)
 
     def update(frame):
         objs = state["objects"]
@@ -270,7 +265,7 @@ def animate(predict, objects, fields, history, alphas, *,
 
         # noise field on the unit sheet
         ax_field.clear()
-        ax_field.imshow(field.numpy().reshape(side, side), origin="lower",
+        ax_field.imshow(field.cpu().numpy().reshape(side, side), origin="lower",
                         extent=[0, 1, 0, 1], cmap="magma", vmin=0.0, vmax=vmax)
         ax_field.set_title(f"Noise field   F={weights[0]:.2f} "
                            f"T={weights[1]:.2f} S={weights[2]:.2f}")
@@ -285,8 +280,11 @@ def animate(predict, objects, fields, history, alphas, *,
         ax_speed.set_ylim(0, 1.15)
         ax_speed.set_yticks([0, 0.5, 1.0])
         ax_speed.grid(alpha=0.3)
+        ph = world.circadian_phase(state["clock"], params.circadian_period)
+        clock_txt = (f"{'day' if ph < params.day_fraction else 'NIGHT'} "
+                     f"{ph:.2f}   ")
         ax_speed.set_title(f"speed {speed:.2f}   hunger {state['hunger']:.2f}   "
-                           f"shelter need {state['shelter_need']:.2f}")
+                           f"{clock_txt}goal {state['goal']}")
         return []
 
     fig.tight_layout()
@@ -381,7 +379,7 @@ def concentration_slider(predict, objects, fields, params, schedule, curve,
         _square_axes(ax_env, f"{rec['label']}   eaten {eaten[0]}")
 
         ax_field.clear()
-        ax_field.imshow(rec["field"].numpy().reshape(side, side), origin="lower",
+        ax_field.imshow(rec["field"].cpu().numpy().reshape(side, side), origin="lower",
                         extent=[0, 1, 0, 1], cmap="magma", vmin=0.0, vmax=vmax)
         ax_field.set_title(f"noise field at concentration {conc:.2f}")
         ax_field.set_xticks([])

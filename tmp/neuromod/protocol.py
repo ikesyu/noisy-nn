@@ -49,9 +49,24 @@ def build_network(hidden_dim: int, n_hidden: int = 2, base_std: float = 0.8,
     raise ValueError(f"unknown model kind {kind!r}; use 'analytic' or 'sample'.")
 
 
+def net_device(net) -> torch.device:
+    """The device the model's parameters live on.
+
+    Everything fed to the net -- observations, targets, noise fields -- has to
+    be placed here.  The sample model runs T stochastic forward passes per
+    input, which is ~65x the work of the analytic mean field, so it is only
+    practical on a GPU; keeping the data placement in one helper is what makes
+    the package movable.
+    """
+    return next(net.parameters()).device
+
+
 def evaluate_vector_field(net, obs: torch.Tensor, field: torch.Tensor,
                           n_hidden: int) -> torch.Tensor:
     """Predicted velocities under one noise field, applied to every hidden layer."""
+    dev = net_device(net)
+    obs = obs.to(dev)
+    field = field.to(dev)
     return net(obs, stds=[field] * n_hidden)
 
 
@@ -79,7 +94,7 @@ def train(net, obs: torch.Tensor, targets: dict[str, torch.Tensor],
                     optimizer.zero_grad()
                     pred = evaluate_vector_field(net, obs[idx], state_fields[state],
                                                  n_hidden)
-                    loss = criterion(pred, targets[state][idx])
+                    loss = criterion(pred, targets[state][idx].to(pred.device))
                     loss.backward()
                     optimizer.step()
                     last = loss.item()
@@ -87,7 +102,7 @@ def train(net, obs: torch.Tensor, targets: dict[str, torch.Tensor],
             else:
                 optimizer.zero_grad()
                 pred = evaluate_vector_field(net, obs, state_fields[state], n_hidden)
-                loss = criterion(pred, targets[state])
+                loss = criterion(pred, targets[state].to(pred.device))
                 loss.backward()
                 optimizer.step()
                 history[state].append(loss.item())
@@ -171,14 +186,15 @@ def train_blended(net, pool_positions: np.ndarray, objects: dict, alphas: dict,
         field_w = fieldlib.blend_fields(fields, w, world.CATEGORIES)
         idx = rng.choice(pool_n, size=bs, replace=False)
         pos_b = pool_positions[idx]
+        dev = net_device(net)
         obs_b = torch.tensor(world.encode_observations(pos_b, objs_step,
                                                        food_strengths=fs),
-                             dtype=torch.float32)
+                             dtype=torch.float32, device=dev)
         tgt_b = torch.tensor(world.make_behavior_targets(
                     pos_b, objs_step, alpha_w, gamma=gamma,
                     wall_margin=wall_margin, wall_kappa=wall_kappa,
                     food_strengths=fs),
-                             dtype=torch.float32)
+                             dtype=torch.float32, device=dev)
 
         optimizer.zero_grad()
         loss = criterion(evaluate_vector_field(net, obs_b, field_w, n_hidden),
@@ -201,7 +217,7 @@ def final_losses(net, obs: torch.Tensor, targets: dict[str, torch.Tensor],
     with torch.no_grad():
         for state in states:
             pred = evaluate_vector_field(net, obs, state_fields[state], n_hidden)
-            out[state] = float(criterion(pred, targets[state]).item())
+            out[state] = float(criterion(pred, targets[state].to(pred.device)).item())
     return out
 
 

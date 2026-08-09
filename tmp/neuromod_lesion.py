@@ -63,6 +63,11 @@ from neuromod import fields as F
 from neuromod import protocol as P
 from neuromod import viz, world
 
+# The recorded results of this script were produced with the legacy 6D vector
+# sensing; the module default is now the sector code (the standard benchmark),
+# so pin the old encoding explicitly.
+world.set_sensing("vector")
+
 # Which hidden layer the lesion targets.  Layer 0 is where a zero-sigma unit is
 # genuinely silent, so it is the honest place to both define the recruited set and
 # apply the lesion; --hidden-layers 1 removes the question entirely.
@@ -340,10 +345,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__.split("\n\n")[0])
-    p.add_argument("--model", choices=("analytic", "sample"), default="analytic",
-                   help="analytic is fine and fast here: L2 is about WHERE the "
-                        "behaviours are stored, not about noise being a resource "
-                        "[analytic]")
+    p.add_argument("--model", choices=("analytic", "sample"), default="sample",
+                   help="sample is the mechanism and is the default everywhere; "
+                        "analytic is defensible HERE specifically (L2 asks WHERE "
+                        "the behaviours are stored, not whether noise is a "
+                        "resource) and is ~65x faster, so pass it explicitly if "
+                        "you are running on CPU [sample]")
     p.add_argument("--hidden-layers", type=int, default=1,
                    help="1 keeps sigma-only recruitment exact, which is why the RL "
                         "version of this experiment used a single layer [1]")

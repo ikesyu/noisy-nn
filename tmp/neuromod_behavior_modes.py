@@ -41,15 +41,31 @@ from neuromod import viz, world
 # The wall-consistent (soft-reflection) teacher moved into the benchmark
 # definition: see `world.make_behavior_targets` (Stage 1).
 
+# Single source of truth for every closed-loop default.  The argparse defaults
+# below are READ FROM this instance, so `world.LoopParams()` and this driver can
+# never disagree again (they used to: shelter_radius 0.08 vs 0.12, threat_range
+# 0.4 vs 0.5, refuge_range 0 vs 0.3, risk_hunger 0 vs 0.9, ...).
+_LP = world.LoopParams()
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__.split("\n\n")[0],
     )
     # Model
-    p.add_argument("--model", choices=("analytic", "sample"), default="analytic",
-                   help="analytic = mean field (no SR barrier); sample = mechanism "
-                        "with crossing threshold h>0 [analytic]")
+    p.add_argument("--model", choices=("analytic", "sample"), default="sample",
+                   help="sample = the mechanism, real noise injection with a "
+                        "crossing threshold h>0, and the only level at which SR "
+                        "exists; analytic = the mean field, no subthreshold "
+                        "barrier -- use it only when you specifically want the "
+                        "closed form [sample]")
+    p.add_argument("--device", default="auto",
+                   help="auto | cpu | cuda. The sample model runs T stochastic "
+                        "forward passes per input (~65x the analytic cost: 47 vs "
+                        "0.7 ms/step here), so it is only practical on a GPU -- "
+                        "40k training steps take ~31 min on CPU and ~1.5 min on "
+                        "this RTX 5080 [auto]")
     p.add_argument("--sensing", choices=("sector", "vector"), default="sector",
                    help="sector = K angular sectors x (food,threat,shelter,wall) "
                         "bounded proximities (Stage 1: shared substrate, walls "
@@ -81,9 +97,6 @@ def parse_args() -> argparse.Namespace:
                         "strength) [0.22]")
     p.add_argument("--theta", type=float, default=0.15,
                    help="Intensity cut that carves out the field support [0.15]")
-    p.add_argument("--corner-centers", action="store_true",
-                   help="Reproduce the original asymmetric right-triangle layout "
-                        "(food-threat then share almost nothing)")
     # Task
     p.add_argument("--alpha-mix", type=float, default=None,
                    help="Off-drive weight as a fraction of the dominant one. "
@@ -130,10 +143,6 @@ def parse_args() -> argparse.Namespace:
                    help="Minibatch size, --train-mode pure only; 0 = full batch [0]")
     p.add_argument("--seed", type=int, default=7, help="Random seed [7]")
     # Scene
-    p.add_argument("--layout", choices=("scripted", "random"), default="scripted")
-    p.add_argument("--n-food", type=int, default=5)
-    p.add_argument("--n-threat", type=int, default=3)
-    p.add_argument("--n-shelter", type=int, default=2)
     p.add_argument("--dynamic-objects", action="store_true",
                    help="Slowly move objects during the animation (demo only)")
     p.add_argument("--object-speed", type=float, default=0.002)
@@ -143,49 +152,83 @@ def parse_args() -> argparse.Namespace:
                    default="scripted",
                    help="scripted = reactive closed loop; cycle = smooth blend "
                         "sweep; pure-panels / fields = static diagnostics")
-    p.add_argument("--speed-mode", choices=("learned", "cruise"), default="learned",
-                   help="learned keeps the network's output magnitude, so a "
-                        "silent network freezes; cruise normalises it away "
-                        "(original look) [learned]")
-    p.add_argument("--speed-gain", type=float, default=0.9,
+    p.add_argument("--speed-gain", type=float, default=_LP.speed_gain,
                    help="Agent speed scale [0.9]")
     p.add_argument("--anim-frames", type=int, default=360,
                    help="Length (frames) of the SAVED animation with --save; "
                         "the live window (no --save) runs endlessly [360]")
-    p.add_argument("--eat-radius", type=float, default=0.10)
+    p.add_argument("--eat-radius", type=float, default=_LP.eat_radius)
     # arrival radius raised from 0.08 to sit just inside the DRAWN shelter
     # circle (0.125): with 0.08 the agent spent tens of frames visually inside
     # the shelter yet not counted as arrived (deceleration law is slowest there)
-    p.add_argument("--shelter-radius", type=float, default=0.12)
-    p.add_argument("--refuge-range", type=float, default=0.30,
+    p.add_argument("--shelter-radius", type=float, default=_LP.shelter_radius)
+    p.add_argument("--circadian-period", type=int, default=None,
+                   help="Frames per full day+night cycle, --goal-mode circadian "
+                        "[420]")
+    p.add_argument("--day-fraction", type=float, default=None,
+                   help="Share of the cycle spent foraging; the rest is night, "
+                        "and the night must cover TRAVEL to a shelter plus "
+                        "sleep, not just sleep [0.62]")
+    p.add_argument("--refuge-range", type=float, default=_LP.refuge_range,
                    help="Damp threat urgency by shelter proximity while "
                         "shelter-bound, so the agent dashes in instead of "
                         "hovering at the doorstep when a threat loiters near "
                         "the entrance; 0 restores the original arbitration "
                         "[0.30]")
-    p.add_argument("--risk-hunger", type=float, default=0.9,
+    p.add_argument("--risk-hunger", type=float, default=_LP.risk_hunger,
                    help="Starvation-predation trade-off: damp threat urgency "
                         "by up to this factor once hunger passes 0.6 "
                         "(smoothstep), so a blocked foraging phase ends with "
                         "a dart at the food instead of dragging on; 0 "
-                        "disables [0.9]")
-    p.add_argument("--food-respawn", action="store_true")
-    p.add_argument("--hunger-rate", type=float, default=0.006)
-    p.add_argument("--need-rate", type=float, default=0.006)
-    p.add_argument("--eat-amount", type=float, default=0.6)
-    p.add_argument("--rest-frames", type=int, default=50)
-    p.add_argument("--threat-gain", type=float, default=1.7)
+                        "disables.  This is the LIVELY end of the trade-off and "
+                        "is the shipped default: with --panic-range 0.22 it "
+                        "measures the best foraging (8.9-9.6 foods/1k over four "
+                        "nets) and sheltering (0.19-0.22), no stalls, and low "
+                        "wall dwell -- but threat contact is reduced, NOT "
+                        "removed (0.09-0.19%% of frames, closest approach "
+                        "0.021-0.040).  For zero measured contact use "
+                        "--risk-hunger 0.6 --panic-range 0.34, which costs "
+                        "about 20%% of the foraging [0.9]")
+    p.add_argument("--panic-range", type=float, default=_LP.panic_range,
+                   help="Radius inside which the courage (--risk-hunger) and "
+                        "refuge (--refuge-range) dampings are VETOED, so "
+                        "avoidance is never switched off at point-blank range. "
+                        "This is what separates 'dares to approach a distant "
+                        "threat' from 'walks into one'; 0 restores the old "
+                        "all-or-nothing courage [0.22]")
+    p.add_argument("--turn-rate", type=float, default=_LP.turn_rate,
+                   help="Max heading change per frame in radians.  0.65 "
+                        "measured wall dwell AND stalls at exactly zero; 0.20 "
+                        "leaves 1.5%% wall dwell [0.65]")
+    p.add_argument("--speed-ref", type=float, default=None,
+                   help="This animal's normal |v|, which rescales 'learned' "
+                        "speed mode (see world.step_agent). Default: measured "
+                        "automatically from the trained net; pass a number to "
+                        "override or 0 to disable")
+    p.add_argument("--hunger-rate", type=float, default=_LP.hunger_rate)
+    p.add_argument("--eat-amount", type=float, default=_LP.eat_amount)
+    p.add_argument("--rest-frames", type=int, default=_LP.rest_frames)
+    p.add_argument("--food-regrow-frames", type=int, default=_LP.food_regrow_frames,
+                   help="Frames an eaten food stays gone before it regrows.  0 "
+                        "restores the old rule, which respawned it as soon as "
+                        "the animal was 0.25 away -- one patch could then be "
+                        "harvested over and over and the diet collapsed onto it "
+                        "(one of three foods eaten 1 time against 200 and 183, "
+                        "and one den used on 105 nights against 5).  260 "
+                        "measures diet evenness 0.86 and den evenness 0.94 "
+                        "with the night-home rate unchanged [260]")
+    p.add_argument("--threat-gain", type=float, default=_LP.threat_gain)
     # threat-range / neuromod-smoothing raised from 0.40 / 0.12: at the old
     # values the urgency ramp plus the field cross-fade lag (~8 frames) let the
     # agent graze right past a threat before the flee field took over.  0.50 /
     # 0.20 nearly doubles the minimum threat distance (0.15 -> 0.27) and cuts
     # d<0.3 close calls 3.3% -> 1.0% on the wallG network; pushing further
     # (range 0.6, gain 2.3) collapses foraging and re-inflates wall dwell.
-    p.add_argument("--threat-range", type=float, default=0.50)
-    p.add_argument("--neuromod-smoothing", type=float, default=0.20)
-    p.add_argument("--threat-motion", choices=("moving", "static"), default="moving")
-    p.add_argument("--threat-speed", type=float, default=0.01)
-    p.add_argument("--velocity-smoothing", type=float, default=0.2)
+    p.add_argument("--threat-range", type=float, default=_LP.threat_range)
+    p.add_argument("--neuromod-smoothing", type=float, default=_LP.neuromod_smoothing)
+    p.add_argument("--threat-motion", choices=("moving", "static"), default=_LP.threat_motion)
+    p.add_argument("--threat-speed", type=float, default=_LP.threat_speed)
+    p.add_argument("--velocity-smoothing", type=float, default=_LP.velocity_smoothing)
     # Output
     p.add_argument("--save", action="store_true",
                    help="Write figures/animation to --out-dir instead of showing")
@@ -211,11 +254,9 @@ def main() -> None:
             if args.save else None
 
     # --- Scene ---
-    objects = (world.make_scripted_objects() if args.layout == "scripted"
-               else world.make_objects(rng, args.n_food, args.n_threat, args.n_shelter))
+    objects = world.make_scripted_objects()
     velocities = world.make_object_velocities(rng, objects, args.object_speed)
-    print(f"Layout '{args.layout}': "
-          + ", ".join(f"{k}={objects[k].shape[0]}" for k in world.CATEGORIES))
+    print("Scene: " + ", ".join(f"{k}={objects[k].shape[0]}" for k in world.CATEGORIES))
 
     # --- Data ---
     alphas = world.alpha_states(args.alpha_mix)
@@ -231,19 +272,23 @@ def main() -> None:
     }
 
     # --- Noise fields ---
-    centers = None
-    if args.corner_centers:
-        centers = {"food": (0.25, 0.75), "threat": (0.75, 0.25), "shelter": (0.25, 0.25)}
-    noise_fields = F.build_fields(world.CATEGORIES, args.hidden_dim, args.base_std,
-                                  args.sigma, args.theta, radius=args.field_radius,
-                                  centers=centers)
+    device = torch.device(
+        ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto"
+        else args.device)
+    noise_fields = {k: v.to(device) for k, v in F.build_fields(
+        world.CATEGORIES, args.hidden_dim, args.base_std, args.sigma, args.theta,
+        radius=args.field_radius).items()}
     state_fields = {s: noise_fields[world.STATE_TO_FIELD[s]] for s in world.STATES}
 
     # --- Model ---
     n_hidden = args.hidden_layers
     net = P.build_network(args.hidden_dim, n_hidden=n_hidden, base_std=args.base_std,
                         kind=args.model, t=args.samples, crossing_h=args.crossing_h,
-                        in_dim=world.obs_dim())
+                        in_dim=world.obs_dim()).to(device)
+    if args.model == "sample" and device.type == "cpu":
+        print("WARNING: the sample model on CPU is ~65x slower than analytic; "
+              f"{args.train_steps} steps will take roughly "
+              f"{args.train_steps * 47e-3 / 60:.0f} min.  Use --device cuda.")
     print(f"\nModel : {args.model}  sensing={args.sensing}  "
           f"structure=[{world.obs_dim()}, "
           + ", ".join([str(args.hidden_dim)] * n_hidden) + ", 2]")
@@ -290,11 +335,40 @@ def main() -> None:
     F.print_overlap_report(report)
 
     # --- Visualise ---
+    net.eval()
+
     def predict(obs_array, field):
         with torch.no_grad():
             return P.evaluate_vector_field(
-                net, torch.as_tensor(obs_array, dtype=torch.float32), field,
-                n_hidden).numpy()
+                net, torch.as_tensor(obs_array, dtype=torch.float32, device=device),
+                field, n_hidden).cpu().numpy()
+
+    # --- This animal's normal |v| (see world.step_agent) ---
+    # `speed_gain` was picked for cruise mode where |v| is 1 by construction; a
+    # trained net's typical |v| is well below that, so without this the animal
+    # crawls.  Measuring it beats hard-coding one: it differs per model kind,
+    # and the sample model's magnitude in particular depends on h/sigma.
+    speed_ref = args.speed_ref
+    if speed_ref is None:
+        probe_pos = np.random.default_rng(0).uniform(
+            -1.0, 1.0, size=(4096, 2)).astype(np.float32)
+        probe_obs = world.encode_observations(probe_pos, objects)
+        mags = []
+        for w in (np.float32([1, 0, 0]), np.float32([0, 1, 0]), np.float32([0, 0, 1]),
+                  np.float32([.5, .5, 0]), np.float32([0, .5, .5])):
+            mags.append(np.linalg.norm(
+                predict(probe_obs, F.blend_fields(noise_fields, w, world.CATEGORIES)),
+                axis=1))
+        # The 30th percentile, not the median.  speed_ref is a saturation point
+        # -- the animal runs at full `speed_gain` wherever |v| >= speed_ref and
+        # proportionally slower below it -- so calibrating to the median leaves
+        # it below full pace half the time.  That slack is what lets a wandering
+        # threat close on it: measured contact roughly doubles at the median
+        # (0.82) versus 0.65 on the same networks.
+        speed_ref = float(np.percentile(np.concatenate(mags), 30))
+        print(f"\nMeasured speed_ref (30th pct |v| over the arena): {speed_ref:.4f}")
+    elif speed_ref == 0:
+        speed_ref = None
 
     if args.demo_mode == "fields":
         viz.field_sheet(noise_fields, args.hidden_dim, save_path=out("fields", "png"))
@@ -309,20 +383,31 @@ def main() -> None:
         viz.pure_panels(predict, objects, noise_fields,
                         save_path=out("pure_panels", "png"))
 
+    # ONE LoopParams for the animation -- the same object a headless
+    # `world.rollout` would take, so what you watch is what gets measured.
+    params = world.LoopParams(
+        eat_radius=args.eat_radius, shelter_radius=args.shelter_radius,
+        speed_gain=args.speed_gain,
+        speed_ref=speed_ref, turn_rate=args.turn_rate,
+        velocity_smoothing=args.velocity_smoothing,
+        hunger_rate=args.hunger_rate,
+        eat_amount=args.eat_amount, rest_frames=args.rest_frames,
+        food_regrow_frames=args.food_regrow_frames,
+        threat_gain=args.threat_gain, threat_range=args.threat_range,
+        neuromod_smoothing=args.neuromod_smoothing,
+        refuge_range=args.refuge_range, risk_hunger=args.risk_hunger,
+        panic_range=args.panic_range,
+        circadian_period=(args.circadian_period or world.CIRCADIAN_PERIOD),
+        day_fraction=(args.day_fraction if args.day_fraction is not None
+                      else world.DAY_FRACTION),
+        threat_motion=args.threat_motion, threat_speed=args.threat_speed,
+        threat_seed=args.seed)
+
     viz.animate(predict, objects, noise_fields, history, alphas,
-                demo_mode=args.demo_mode, layout=args.layout,
-                anim_frames=args.anim_frames, eat_radius=args.eat_radius,
-                shelter_radius=args.shelter_radius, food_respawn=args.food_respawn,
-                speed_mode=args.speed_mode, speed_gain=args.speed_gain,
-                hunger_rate=args.hunger_rate, need_rate=args.need_rate,
-                eat_amount=args.eat_amount, rest_frames=args.rest_frames,
-                threat_gain=args.threat_gain, threat_range=args.threat_range,
-                neuromod_smoothing=args.neuromod_smoothing,
-                refuge_range=args.refuge_range, risk_hunger=args.risk_hunger,
-                threat_motion=args.threat_motion, threat_speed=args.threat_speed,
-                seed=args.seed, dynamic=args.dynamic_objects, velocities=velocities,
+                params=params, demo_mode=args.demo_mode,
+                anim_frames=args.anim_frames,
+                dynamic=args.dynamic_objects, velocities=velocities,
                 show_reference=args.show_reference, target_gamma=args.target_gamma,
-                velocity_smoothing=args.velocity_smoothing,
                 hidden_dim=args.hidden_dim,
                 save_path=out(args.demo_mode, "gif"), fps=args.fps)
 

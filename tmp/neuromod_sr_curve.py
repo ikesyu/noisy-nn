@@ -118,6 +118,11 @@ from neuromod import fields as F
 from neuromod import protocol as P
 from neuromod import world
 
+# The recorded results of this script were produced with the legacy 6D vector
+# sensing; the module default is now the sector code (the standard benchmark),
+# so pin the old encoding explicitly.
+world.set_sensing("vector")
+
 N_HIDDEN = 2                      # this script's fixed [6, H, H, 2] convention
 
 
@@ -345,9 +350,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-steps", type=int, default=13,
                    help="Number of training levels for --sweep train [13]")
     p.add_argument("--model", choices=("analytic", "sample", "statistic"),
-                   default="analytic",
-                   help="NNN variant: 'analytic' expectation (fast, default), "
-                        "'sample' real injected noise (genuine SR), or 'statistic'")
+                   default="sample",
+                   help="NNN variant: 'sample' real injected noise -- the "
+                        "default, and the ONLY one in which SR exists at all, "
+                        "which is what this script measures; 'analytic' is the "
+                        "mean field and has no subthreshold barrier; "
+                        "'statistic' [sample]")
     p.add_argument("--crossing-h", type=float, default=0.2,
                    help="Crossing threshold h for sample/statistic (SR needs h>0) [0.2]")
     p.add_argument("--samples",   type=int,   default=64,

@@ -123,6 +123,9 @@ def crossing_rates(net, obs: torch.Tensor, field: torch.Tensor,
     expected response, and the sample model's is averaged over its T samples.
     Returns one [hidden_dim] array per hidden layer.
     """
+    dev = next(net.parameters()).device
+    obs = obs.to(dev)
+    field = field.to(dev)
     captured: dict[int, torch.Tensor] = {}
     handles = []
     layers = stats.crossing_layers(net)
@@ -227,10 +230,11 @@ def kill_units(net, mask: np.ndarray, fields: dict[str, torch.Tensor],
     crossings = stats.crossing_layers(net)
     crossing = crossings[layer]
     if hasattr(crossing, "h"):
+        dev = next(net.parameters()).device
         h = crossing.h
         if not torch.is_tensor(h):
-            h = torch.full((mask.size,), float(h))
-        h = h.clone()
+            h = torch.full((mask.size,), float(h), device=dev)
+        h = h.clone().to(dev)
         h[idx] = h_dead
         crossing.h = h
     with torch.no_grad():

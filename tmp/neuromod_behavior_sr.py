@@ -9,10 +9,9 @@ on the input, and the animal wanders.  That is Yerkes-Dodson drawn as behaviour.
 
 Two things make this honest rather than decorative:
 
-    speed_mode="learned"   the closed loop uses the network's output MAGNITUDE, so a
-                           silent network produces a stationary animal.  Normalising
-                           the heading away (the "cruise" mode) hides the low-noise
-                           collapse, which is the left arm of the inverted U.
+    The closed loop uses the network's output MAGNITUDE as the speed, so a
+    silent network is a FROZEN animal; normalising the magnitude away would
+    hide the low-noise collapse that behaviour-level SR is about.
     --model sample         the mean field has no subthreshold barrier, so behavioural
                            SR cannot exist in it (`docs/idea_neuromod.md` section 6).
                            `--model analytic` is available as the predicted null.
@@ -58,6 +57,11 @@ for _p in (str(ROOT), str(TMP_DIR)):
 from neuromod import fields as F
 from neuromod import protocol as P
 from neuromod import viz, world
+
+# The recorded results of this script were produced with the legacy 6D vector
+# sensing; the module default is now the sector code (the standard benchmark),
+# so pin the old encoding explicitly.
+world.set_sensing("vector")
 
 N_HIDDEN = 2
 
@@ -134,9 +138,9 @@ def make_predict(net):
 def loop_params(args, threat_seed: int) -> world.LoopParams:
     return world.LoopParams(
         eat_radius=args.eat_radius, shelter_radius=args.shelter_radius,
-        food_respawn=True, speed_mode=args.speed_mode, speed_gain=args.speed_gain,
+        food_respawn=True, speed_gain=args.speed_gain,
         velocity_smoothing=args.velocity_smoothing, dt=args.dt,
-        hunger_rate=args.hunger_rate, need_rate=args.need_rate,
+        hunger_rate=args.hunger_rate,
         eat_amount=args.eat_amount, rest_frames=args.rest_frames,
         threat_gain=args.threat_gain, threat_range=args.threat_range,
         neuromod_smoothing=args.neuromod_smoothing,
@@ -226,7 +230,7 @@ def summarise(agg, args) -> None:
     hi_ratio = y[-1] / y[best] if y[best] > 0 else float("nan")
 
     print(f"\n{args.metric} over concentration ({args.sweep} sweep, "
-          f"model={args.model}, speed_mode={args.speed_mode}):")
+          f"model={args.model}):")
     print(f"  peak {y[best]:.3f} +-{e[best]:.3f} at concentration {x[best]:.3f}"
           + (f"  (h/sigma = {args.crossing_h / (args.base_std * x[best]):.3f})"
              if args.model != "analytic" else ""))
@@ -335,7 +339,7 @@ def write_csv(path: Path, rows, args):
     keys = list(rows[0].keys())
     with path.open("w") as f:
         f.write(f"# neuromod_behavior_sr  sweep={args.sweep} model={args.model} "
-                f"speed_mode={args.speed_mode} base_std={args.base_std} "
+                f"base_std={args.base_std} "
                 f"frames={args.frames} episodes={args.episodes} epochs={args.epochs}\n")
         f.write(",".join(keys) + "\n")
         for row in rows:
@@ -353,9 +357,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", choices=("sample", "analytic"), default="sample",
                    help="sample is the mechanism; analytic is the predicted null "
                         "(no subthreshold barrier) [sample]")
-    p.add_argument("--speed-mode", choices=("learned", "cruise"), default="learned",
-                   help="learned keeps the output magnitude, so silence freezes the "
-                        "animal. 'cruise' hides the low-noise arm [learned]")
     p.add_argument("--metric", default="foods_per_1k",
                    help="Headline behavioural measure [foods_per_1k]")
     # Concentration axis
@@ -403,14 +404,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--velocity-smoothing", type=float, default=0.2)
     p.add_argument("--dt", type=float, default=0.04)
     p.add_argument("--eat-radius", type=float, default=0.10)
-    p.add_argument("--shelter-radius", type=float, default=0.08)
+    p.add_argument("--shelter-radius", type=float, default=world.LoopParams().shelter_radius)
     p.add_argument("--hunger-rate", type=float, default=0.006)
     p.add_argument("--need-rate", type=float, default=0.006)
     p.add_argument("--eat-amount", type=float, default=0.6)
     p.add_argument("--rest-frames", type=int, default=50)
     p.add_argument("--threat-gain", type=float, default=1.7)
-    p.add_argument("--threat-range", type=float, default=0.40)
-    p.add_argument("--neuromod-smoothing", type=float, default=0.12)
+    p.add_argument("--threat-range", type=float, default=world.LoopParams().threat_range)
+    p.add_argument("--neuromod-smoothing", type=float, default=world.LoopParams().neuromod_smoothing)
     p.add_argument("--threat-motion", choices=("moving", "static"), default="moving")
     p.add_argument("--threat-speed", type=float, default=0.01)
     # Animation
@@ -446,7 +447,7 @@ def main() -> None:
     objects, obs, targets = build_data(args)
 
     n_nets = 1 if args.sweep == "test" else args.concentrations * args.seeds
-    print(f"sweep={args.sweep}  model={args.model}  speed_mode={args.speed_mode}  "
+    print(f"sweep={args.sweep}  model={args.model}  "
           f"concentrations={args.concentrations} in "
           f"[{args.c_min}, {args.c_max}]  episodes={args.episodes} x {args.frames} "
           f"frames  ({n_nets} networks to train)")
